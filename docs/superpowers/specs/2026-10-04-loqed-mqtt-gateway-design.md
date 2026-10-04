@@ -147,14 +147,14 @@ Precedence: environment variables > YAML file (`--config`) > add-on `/data/optio
 ```yaml
 cloud_token: ""              # required
 locks: []                    # allow-list by lock name or id; empty = all locks on account
-lock_overrides:              # keyed by lock id or name; all fields optional
+lock_settings:               # optional, keyed by lock id or name; all fields optional
   <id-or-name>:
     bridge_ip: ""            # pin IP regardless of cloud data
     bridge_key: ""           # manual local credentials (used when cloud lacks them)
     key_secret: ""
     local_id: 0
-key_names:                   # optional, per lock: key_local_id -> display name
-  <id-or-name>: { 1: "Alice" }
+    key_names:               # key_local_id -> display name for events
+      1: "Alice"
 cache_path: /data/locks.json
 cache_max_age: 0             # 0 = never expire by age
 reconcile_interval: 24h      # max interval between /status reconciles in local mode
@@ -175,7 +175,7 @@ homeassistant:
 log_level: info
 ```
 
-Validation fails fast with a clear message (missing token, bad durations, unknown override keys referencing no lock are warnings, not errors).
+Validation fails fast with a clear message (missing token, bad durations, `lock_settings` entries matching no lock are warnings, not errors).
 
 Supervisor: if `SUPERVISOR_TOKEN` is set and `mqtt.url` is empty, `GET http://supervisor/services/mqtt` (Bearer `SUPERVISOR_TOKEN`) provides host/port/username/password/ssl.
 
@@ -193,9 +193,9 @@ Cloud refresh (`ListLocks` + save) is triggered when:
 
 Refreshes consume the shared cloud budget (5.5) and are additionally limited to one per 5 minutes per lock-trigger. If the cloud is unreachable but a cache exists, start from cache. If neither exists, exit non-zero with a clear message.
 
-Connection target is always an IP (override > cache). Hostnames/mDNS are never resolved.
+Connection target is always an IP (`lock_settings.bridge_ip` > cache). Hostnames/mDNS are never resolved.
 
-Locks whose cloud data lacks local credentials and have no manual override run **cloud-only** (never enter `local`).
+Locks whose cloud data lacks local credentials and have no manual credentials in `lock_settings` run **cloud-only** (never enter `local`).
 
 ### 5.3 Startup
 
@@ -258,7 +258,7 @@ Bolt state → HA lock state:
 
 Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`, `unlocking`, `opening`, `jammed`, `unknown`. Unrecognized raw event types map to `unknown` (never dropped).
 
-Event attributes: `reason` (raw `event_type`), `source` (parsed from raw type: `touch`, `remote`, `ble`, `twist_assist`, `instant_open`, `manual`, `other`), `key_local_id` (null if absent or 255), `key_name` (from `key_names`, if configured).
+Event attributes: `reason` (raw `event_type`), `source` (parsed from raw type: `touch`, `remote`, `ble`, `twist_assist`, `instant_open`, `manual`, `other`), `key_local_id` (null if absent or 255), `key_name` (from `lock_settings.<lock>.key_names`, if configured).
 
 Events are emitted only from bridge webhooks (local mode). No synthetic events from cloud polling. Event delivery is best-effort (webhooks can be lost); documentation states that automations about *whether* the door is locked must use the lock entity.
 
