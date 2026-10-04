@@ -16,7 +16,9 @@
 - Library packages (`loqed` root, `bridge`, `cloud`, `cloud/portal`, `internal/transport`) import only the standard library.
 - No goroutines, timers or package-level mutable state in library packages.
 - Every network method takes `context.Context` as its first parameter.
-- Errors: branch only on `loqed.ErrUnauthorized`, `loqed.ErrRateLimited`, `loqed.ErrUnreachable`, `loqed.ErrBadSignature`, `loqed.ErrStaleTimestamp`, `loqed.ErrInvalidPayload`, or `*loqed.APIError`. Never put secrets, signed commands or full URLs with queries into error strings.
+- Errors: branch only on `loqed.ErrUnauthorized`, `loqed.ErrRateLimited`, `loqed.ErrUnreachable` (provably not delivered), `loqed.ErrNoResponse` (may have been delivered), `loqed.ErrBadSignature`, `loqed.ErrStaleTimestamp`, `loqed.ErrInvalidPayload`, or `*loqed.APIError`. Never put secrets, signed commands, URLs (with queries), headers or portal HTML into error strings — including canceled-context and invalid-address errors. Wrap inner errors with `%w`.
+- State-reached events derive the bolt state from `event_type` (`loqed.ReachedState`), never from `requested_state`.
+- Code is `gofmt`-clean and passes `golangci-lint` v2.14.0 with the repo's `.golangci.yml` (created in Task 1).
 - Bridge request headers must be sent with the exact names `TIMESTAMP` and `HASH`.
 - Bridge webhook timestamp tolerance: ±10 s.
 - Cloud base URL: `https://integrations.production.loqed.com`.
@@ -29,7 +31,9 @@
 - Command URL must be byte-identical to Python `urllib.parse.quote(base64)`: `+`→`%2B`, `=`→`%3D`, `/` kept literal (Task 3 golden test checks `RawQuery`).
 - Header names `TIMESTAMP`/`HASH` must reach the wire in upper case; Go canonicalizes `Header.Set` (Task 4 round-tripper test inspects the raw header map).
 - Cloud API answers unauthenticated requests with `302 → /login` (observed 2026-10-04), not 401; must surface as `ErrUnauthorized`, not a JSON decode error (Task 6 redirect test).
-- Portal `XSRF-TOKEN` cookie is URL-encoded; the header value must be the decoded form, or every POST fails with 419 (Task 8 fake server rejects undecoded values).
+- The real portal was observed **without** an `XSRF-TOKEN` cookie; CSRF must also work from `<meta name="csrf-token">` via `X-CSRF-TOKEN`, and a 419 must not be reported as a wrong password (Task 8 no-cookie and reject-CSRF tests).
+- An Inertia 409 after a token-create redirect must not re-send the create (duplicate tokens) and must still return the flashed token (Task 8 bump-on-create test).
+- A bridge that received a command but did not answer must surface as `ErrNoResponse`, never `ErrUnreachable` (the gateway would otherwise actuate the lock twice via the cloud) (Task 1 timeout/reset tests).
 
 ---
 
@@ -37,11 +41,12 @@
 
 ```
 go.mod                         module + go version (rewritten)
-loqed.go                       package doc, BoltState
+.golangci.yml                  lint config (shared with the gateway)
+loqed.go                       package doc, BoltState, ReachedState, GoToTarget
 errors.go                      sentinel errors, APIError
 flex.go                        lenient JSON scalars: Int, Float, Bool, String
 flex_test.go, loqed_test.go
-internal/transport/transport.go      Do/CheckStatus: HTTP → sentinel errors
+internal/transport/transport.go      Do/Send/CheckStatus: HTTP → sentinel errors
 internal/transport/transport_test.go
 bridge/client.go               Client, New, options, Status
 bridge/types.go                Status, Action, Triggers, Webhook
@@ -59,30 +64,31 @@ cloud/portal/portal_test.go
 cloud/portal/fake_test.go      fake Laravel/Inertia portal
 ```
 
-Removed: `pkg/loqed_bridge_api/` (2023 draft), old `go.sum`.
+Removed: `pkg/loqed_bridge_api/` (2023 draft, untracked), old `go.sum`.
 
 ---
 
 ### Task 1: Module reset, root package, transport helper
 
 **Files:**
-- Delete: `pkg/loqed_bridge_api/client.go`, `pkg/loqed_bridge_api/client_test.go`, `pkg/loqed_bridge_api/types.go`, `pkg/loqed_bridge_api/webhook.go`, `go.sum`
+- Delete (untracked files, so plain `rm`): `pkg/` (2023 draft), `go.sum`
 - Modify: `go.mod`, `.devcontainer/devcontainer.json`
-- Create: `loqed.go`, `errors.go`, `flex.go`, `flex_test.go`, `loqed_test.go`, `internal/transport/transport.go`, `internal/transport/transport_test.go`, `.gitignore`
+- Create: `loqed.go`, `errors.go`, `flex.go`, `flex_test.go`, `loqed_test.go`, `internal/transport/transport.go`, `internal/transport/transport_test.go`, `.gitignore`, `.golangci.yml`
 
 **Interfaces:**
 - Produces:
   - `loqed.BoltState` (`string`) with constants `BoltUnknown="unknown"`, `BoltOpen="open"`, `BoltDayLock="day_lock"`, `BoltNightLock="night_lock"`; `func ParseBoltState(s string) BoltState`; `(*BoltState).UnmarshalJSON`.
-  - `loqed.Int` (int64), `loqed.Float` (float64), `loqed.Bool` (bool), `loqed.String` (string) — each with lenient `UnmarshalJSON`.
-  - Sentinels `loqed.ErrUnauthorized, ErrRateLimited, ErrUnreachable, ErrBadSignature, ErrStaleTimestamp, ErrInvalidPayload`; `type APIError struct{ StatusCode int; Body string }`; `func IsServerError(err error) bool`.
-  - `transport.MaxBody` (1 MiB), `func transport.Do(hc *http.Client, req *http.Request) ([]byte, error)`, `func transport.CheckStatus(code int, body []byte) error`.
+  - `func loqed.ReachedState(eventType string) (BoltState, bool /*jammed*/)`, `func loqed.IsGoToState(eventType string) bool`, `func loqed.GoToTarget(eventType, goToState string) BoltState` (used by Tasks 5 and 7, and by the gateway).
+  - `loqed.Int` (int64), `loqed.Float` (float64), `loqed.Bool` (bool), `loqed.String` (string) — each with lenient `UnmarshalJSON` (`""` → zero, `null` → unchanged).
+  - Sentinels `loqed.ErrUnauthorized, ErrRateLimited, ErrUnreachable, ErrNoResponse, ErrBadSignature, ErrStaleTimestamp, ErrInvalidPayload`; `type APIError struct{ StatusCode int; Body string }`; `func IsServerError(err error) bool`.
+  - `transport.MaxBody` (1 MiB), `func transport.Do(hc *http.Client, req *http.Request) ([]byte, error)`, `func transport.Send(hc, req) (*http.Response, []byte, error)` (no status mapping; body read and closed), `func transport.CheckStatus(code int, body []byte) error`.
 
 - [ ] **Step 1: Remove the 2023 draft and reset the module**
 
 ```bash
 cd ~/dev/go-loqed
-git rm -r -q pkg
-rm -f go.sum
+rm -rf pkg go.sum   # untracked 2023 draft; `git rm` would fail
+test ! -e pkg
 cat > go.mod <<'EOF'
 module github.com/t3hk0d3/go-loqed
 
@@ -94,6 +100,37 @@ cat > .gitignore <<'EOF'
 /dist/
 EOF
 sed -i 's#"image": "mcr.microsoft.com/devcontainers/go:1-1.21-bullseye"#"image": "mcr.microsoft.com/devcontainers/go:1"#' .devcontainer/devcontainer.json
+cat > .golangci.yml <<'YAML'
+version: "2"
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - unconvert
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Tests use fixed fake secrets and ad-hoc servers.
+      - path: _test\.go
+        linters: [gosec]
+      # Integer conversions are range-checked where it matters (key ids,
+      # timestamps from time.Now); URLs come from configuration, not users.
+      - linters: [gosec]
+        text: "G115|G107|G704"
+formatters:
+  enable:
+    - gofmt
+YAML
+```
+
+Lint command used throughout both plans (no global install needed; v2.14.0 is the pinned version):
+
+```bash
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
 ```
 
 - [ ] **Step 2: Write failing tests for the root package**
@@ -111,11 +148,14 @@ import (
 )
 
 func TestIntDecodesNumbersStringsAndNull(t *testing.T) {
+	// Every case starts from 99 so null (no-op) and "" (zero) are observable.
 	cases := map[string]loqed.Int{
-		`78`: 78, `"78"`: 78, `" 78 "`: 78, `78.0`: 78, `-1`: -1, `"-1"`: -1, `null`: 0, `""`: 0,
+		`78`: 78, `"78"`: 78, `" 78 "`: 78, `78.0`: 78, `-1`: -1, `"-1"`: -1, `null`: 99, `""`: 0,
 	}
 	for in, want := range cases {
-		var got struct{ V loqed.Int `json:"v"` }
+		got := struct {
+			V loqed.Int `json:"v"`
+		}{V: 99}
 		if err := json.Unmarshal([]byte(`{"v":`+in+`}`), &got); err != nil {
 			t.Fatalf("%s: %v", in, err)
 		}
@@ -126,7 +166,9 @@ func TestIntDecodesNumbersStringsAndNull(t *testing.T) {
 }
 
 func TestIntPointerNullIsNil(t *testing.T) {
-	var got struct{ V *loqed.Int `json:"v"` }
+	var got struct {
+		V *loqed.Int `json:"v"`
+	}
 	if err := json.Unmarshal([]byte(`{"v":null}`), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +178,9 @@ func TestIntPointerNullIsNil(t *testing.T) {
 }
 
 func TestIntRejectsGarbage(t *testing.T) {
-	var got struct{ V loqed.Int `json:"v"` }
+	var got struct {
+		V loqed.Int `json:"v"`
+	}
 	if err := json.Unmarshal([]byte(`{"v":"abc"}`), &got); err == nil {
 		t.Fatal("expected error")
 	}
@@ -191,8 +235,55 @@ func TestParseBoltState(t *testing.T) {
 	}
 }
 
+func TestReachedState(t *testing.T) {
+	cases := []struct {
+		in     string
+		state  loqed.BoltState
+		jammed bool
+	}{
+		{"STATE_CHANGED_OPEN", loqed.BoltOpen, false},
+		{"STATE_CHANGED_OPEN_REMOTE", loqed.BoltOpen, false},
+		{"STATE_CHANGED_LATCH", loqed.BoltDayLock, false},
+		{"STATE_CHANGED_LATCH_REMOTE", loqed.BoltDayLock, false},
+		{"STATE_CHANGED_NIGHT_LOCK", loqed.BoltNightLock, false},
+		{"STATE_CHANGED_NIGHT_LOCK_REMOTE", loqed.BoltNightLock, false},
+		{"STATE_CHANGED_UNKNOWN", loqed.BoltUnknown, false},
+		{"MOTOR_STALL", loqed.BoltUnknown, true},
+		{"SOMETHING_NEW", loqed.BoltUnknown, false},
+	}
+	for _, c := range cases {
+		s, j := loqed.ReachedState(c.in)
+		if s != c.state || j != c.jammed {
+			t.Errorf("%s: got %q,%v want %q,%v", c.in, s, j, c.state, c.jammed)
+		}
+	}
+}
+
+func TestGoToTarget(t *testing.T) {
+	cases := []struct {
+		et, goTo string
+		want     loqed.BoltState
+	}{
+		{"GO_TO_STATE_TWIST_ASSIST_LATCH", "DAY_LOCK", loqed.BoltDayLock},
+		{"GO_TO_STATE_INSTANTOPEN_OPEN", "", loqed.BoltOpen},
+		{"GO_TO_STATE_TOUCH_TO_LOCK", "", loqed.BoltNightLock},
+		{"GO_TO_STATE_MANUAL_UNLOCK_VIA_OUTSIDE_LATCH", "", loqed.BoltDayLock},
+		{"GO_TO_STATE_WHATEVER", "", loqed.BoltUnknown},
+	}
+	for _, c := range cases {
+		if got := loqed.GoToTarget(c.et, c.goTo); got != c.want {
+			t.Errorf("%s/%s: got %q want %q", c.et, c.goTo, got, c.want)
+		}
+	}
+	if !loqed.IsGoToState("go_to_state_touch_to_lock") || loqed.IsGoToState("STATE_CHANGED_OPEN") {
+		t.Error("IsGoToState")
+	}
+}
+
 func TestBoltStateUnmarshalNormalizes(t *testing.T) {
-	var v struct{ S loqed.BoltState `json:"s"` }
+	var v struct {
+		S loqed.BoltState `json:"s"`
+	}
 	if err := json.Unmarshal([]byte(`{"s":"NIGHT_LOCK"}`), &v); err != nil {
 		t.Fatal(err)
 	}
@@ -216,8 +307,8 @@ func TestIsServerError(t *testing.T) {
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `go test ./...`
-Expected: FAIL — `undefined: loqed.Int` (package does not exist yet).
+Run: `go test .`
+Expected: FAIL — `no non-test Go files in …/go-loqed` (the package does not exist yet).
 
 - [ ] **Step 4: Implement the root package**
 
@@ -232,7 +323,6 @@ Expected: FAIL — `undefined: loqed.Int` (package does not exist yet).
 package loqed
 
 import (
-	"encoding/json"
 	"strings"
 )
 
@@ -256,6 +346,51 @@ func ParseBoltState(s string) BoltState {
 	case "day_lock", "latch":
 		return BoltDayLock
 	case "night_lock":
+		return BoltNightLock
+	default:
+		return BoltUnknown
+	}
+}
+
+// ReachedState derives the bolt state a "state reached" webhook reports
+// from its event_type, exactly like loqedAPI (requested_state is only what
+// was asked for and must not be trusted). MOTOR_STALL reports jammed with an
+// unknown bolt position.
+func ReachedState(eventType string) (state BoltState, jammed bool) {
+	et := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(eventType)), "_REMOTE")
+	switch et {
+	case "STATE_CHANGED_OPEN":
+		return BoltOpen, false
+	case "STATE_CHANGED_LATCH":
+		return BoltDayLock, false
+	case "STATE_CHANGED_NIGHT_LOCK":
+		return BoltNightLock, false
+	case "MOTOR_STALL":
+		return BoltUnknown, true
+	default:
+		return BoltUnknown, false
+	}
+}
+
+// IsGoToState reports whether eventType announces bolt movement
+// (GO_TO_STATE_*).
+func IsGoToState(eventType string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(eventType)), "GO_TO_STATE_")
+}
+
+// GoToTarget returns the movement target: goToState when it is known,
+// otherwise the suffix of the GO_TO_STATE_* event type.
+func GoToTarget(eventType, goToState string) BoltState {
+	if s := ParseBoltState(goToState); s != BoltUnknown {
+		return s
+	}
+	et := strings.ToUpper(strings.TrimSpace(eventType))
+	switch {
+	case strings.HasSuffix(et, "_OPEN"):
+		return BoltOpen
+	case strings.HasSuffix(et, "_LATCH"), strings.HasSuffix(et, "_DAY_LOCK"):
+		return BoltDayLock
+	case strings.HasSuffix(et, "_NIGHT_LOCK"), strings.HasSuffix(et, "_TO_LOCK"):
 		return BoltNightLock
 	default:
 		return BoltUnknown
@@ -288,8 +423,13 @@ var (
 	ErrUnauthorized = errors.New("loqed: unauthorized")
 	// ErrRateLimited: LOQED refused the request because of rate limiting.
 	ErrRateLimited = errors.New("loqed: rate limited")
-	// ErrUnreachable: the endpoint could not be reached (dial error, timeout, reset).
+	// ErrUnreachable: the request was provably not delivered (DNS, dial or
+	// connect failure, including a connect timeout). Safe to retry elsewhere.
 	ErrUnreachable = errors.New("loqed: unreachable")
+	// ErrNoResponse: the request may have been delivered but no complete
+	// response arrived (timeout after sending, connection reset, truncated
+	// body). The remote side may have acted on it; never blindly resend.
+	ErrNoResponse = errors.New("loqed: no response")
 	// ErrBadSignature: an incoming webhook had a missing or wrong HASH/TIMESTAMP.
 	ErrBadSignature = errors.New("loqed: bad signature")
 	// ErrStaleTimestamp: an incoming webhook timestamp is outside the allowed window.
@@ -328,8 +468,8 @@ import (
 	"strings"
 )
 
-// Int decodes a JSON number, numeric string or null (as 0).
-// Use *Int to tell null/absent apart from zero.
+// Int decodes a JSON number or numeric string; "" decodes as 0 and null
+// leaves the value unchanged. Use *Int to tell null/absent apart from zero.
 type Int int64
 
 func (i *Int) UnmarshalJSON(b []byte) error {
@@ -353,7 +493,8 @@ func (i *Int) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Float decodes a JSON number, numeric string or null (as 0).
+// Float decodes a JSON number or numeric string; "" decodes as 0 and null
+// leaves the value unchanged.
 type Float float64
 
 func (f *Float) UnmarshalJSON(b []byte) error {
@@ -427,7 +568,7 @@ func scalarText(b []byte) (text string, null bool, err error) {
 - [ ] **Step 5: Run root tests**
 
 Run: `go test . -v`
-Expected: PASS (all 7 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 6: Write failing transport tests**
 
@@ -439,14 +580,18 @@ package transport_test
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/internal/transport"
 )
+
+const secretPath = "/to_lock?command_signed_base64=SECRET"
 
 func serve(t *testing.T, code int, body string) *httptest.Server {
 	t.Helper()
@@ -464,8 +609,18 @@ func serve(t *testing.T, code int, body string) *httptest.Server {
 func get(t *testing.T, url string) ([]byte, error) {
 	t.Helper()
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	hc := &http.Client{
+		Timeout:       time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	return transport.Do(hc, req)
+}
+
+func noLeak(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("error leaks URL: %v", err)
+	}
 }
 
 func TestDoSuccess(t *testing.T) {
@@ -504,34 +659,81 @@ func TestDoOtherStatusIsAPIErrorWithTruncatedBody(t *testing.T) {
 	}
 }
 
-func TestDoUnreachableHidesURL(t *testing.T) {
+func TestDoConnectionRefusedIsUnreachable(t *testing.T) {
 	srv := serve(t, 200, "")
 	srv.Close()
-	_, err := get(t, srv.URL+"/to_lock?command_signed_base64=SECRET")
-	if !errors.Is(err, loqed.ErrUnreachable) {
+	_, err := get(t, srv.URL+secretPath)
+	if !errors.Is(err, loqed.ErrUnreachable) || errors.Is(err, loqed.ErrNoResponse) {
 		t.Fatalf("got %v", err)
 	}
-	if strings.Contains(err.Error(), "SECRET") {
-		t.Fatalf("error leaks URL: %v", err)
+	noLeak(t, err)
+}
+
+// A server that reads the request and never answers: the request was
+// delivered, so the outcome is unknown.
+func TestDoTimeoutAfterSendIsNoResponse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf) // read the request, then hang
+				time.Sleep(3 * time.Second)
+				_ = c.Close()
+			}()
+		}
+	}()
+	_, err = get(t, "http://"+ln.Addr().String()+secretPath)
+	if !errors.Is(err, loqed.ErrNoResponse) || errors.Is(err, loqed.ErrUnreachable) {
+		t.Fatalf("got %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "Timeout") {
+		t.Fatalf("timeout cause lost: %v", err)
+	}
+	noLeak(t, err)
+}
+
+// A server that closes the connection after reading the request.
+func TestDoResetAfterSendIsNoResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	_, err := get(t, srv.URL+secretPath)
+	if !errors.Is(err, loqed.ErrNoResponse) {
+		t.Fatalf("got %v", err)
+	}
+	noLeak(t, err)
 }
 
 func TestDoCanceledContextIsNotUnreachable(t *testing.T) {
 	srv := serve(t, 200, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+secretPath, nil)
 	_, err := transport.Do(http.DefaultClient, req)
-	if !errors.Is(err, context.Canceled) || errors.Is(err, loqed.ErrUnreachable) {
+	if !errors.Is(err, context.Canceled) || errors.Is(err, loqed.ErrUnreachable) || errors.Is(err, loqed.ErrNoResponse) {
 		t.Fatalf("got %v", err)
 	}
+	noLeak(t, err)
 }
 ```
 
 - [ ] **Step 7: Run to verify failure**
 
 Run: `go test ./internal/transport/`
-Expected: FAIL — `no non-test Go files` / `undefined: transport.Do`.
+Expected: FAIL — `no non-test Go files in …/internal/transport`.
 
 - [ ] **Step 8: Implement transport**
 
@@ -547,7 +749,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
+	"sync/atomic"
 
 	loqed "github.com/t3hk0d3/go-loqed"
 )
@@ -558,29 +762,72 @@ const MaxBody = 1 << 20
 const maxErrorBody = 256
 
 // Do sends req and returns the body of a 2xx response. Failures map to
-// loqed sentinels; the request URL is never included in errors because it
-// may carry a signed command.
+// loqed sentinels:
+//
+//   - ErrUnreachable: the request was never written to a connection, so the
+//     remote side cannot have acted on it;
+//   - ErrNoResponse: the request was written but no complete response came
+//     back (it may have been executed).
+//
+// The request URL is never included in errors because it may carry a signed
+// command.
 func Do(hc *http.Client, req *http.Request) ([]byte, error) {
-	resp, err := hc.Do(req)
+	resp, body, err := Send(hc, req)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil, err
-		}
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return nil, fmt.Errorf("%w: %v", loqed.ErrUnreachable, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBody))
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading response: %v", loqed.ErrUnreachable, err)
+		return nil, err
 	}
 	if err := CheckStatus(resp.StatusCode, body); err != nil {
 		return nil, err
 	}
 	return body, nil
+}
+
+// Send is Do without status mapping: it returns the response (body already
+// read, at most MaxBody, and closed) for callers that need headers or
+// non-2xx statuses. Transport errors are classified like Do.
+func Send(hc *http.Client, req *http.Request) (*http.Response, []byte, error) {
+	var wrote atomic.Bool
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				wrote.Store(true)
+			}
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, nil, requestError(err, wrote.Load())
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBody))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: reading response: %w", loqed.ErrNoResponse, stripURL(err))
+	}
+	return resp, body, nil
+}
+
+// requestError classifies an error returned by http.Client.Do. wrote reports
+// whether the request had been fully written. The URL is stripped.
+func requestError(err error, wrote bool) error {
+	err = stripURL(err)
+	switch {
+	case wrote:
+		return fmt.Errorf("%w: %w", loqed.ErrNoResponse, err)
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("loqed: request canceled: %w", err)
+	default:
+		return fmt.Errorf("%w: %w", loqed.ErrUnreachable, err)
+	}
+}
+
+// stripURL unwraps *url.Error, whose message embeds the full request URL.
+func stripURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 // CheckStatus converts a non-2xx status into an error. Redirects count as
@@ -607,8 +854,8 @@ func CheckStatus(code int, body []byte) error {
 
 - [ ] **Step 9: Run all tests**
 
-Run: `go test ./... && go vet ./...`
-Expected: PASS, no vet findings.
+Run: `gofmt -l . && go vet ./... && go test -race ./...`
+Expected: `gofmt -l` prints nothing; PASS (transport: 7 tests; the timeout test takes ~1 s).
 
 - [ ] **Step 10: Commit**
 
@@ -628,10 +875,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `loqed.Int`, `loqed.Float`, `loqed.BoltState`, `loqed.ErrInvalidPayload`, `transport.Do`.
+- Note: `bridge.New` rejects anything but `IP` or `IP:port` (no hostnames, spec §5.3); request-building errors never quote the URL.
 - Produces:
   - `type bridge.Credentials struct{ BridgeKey, KeySecret string; LocalKeyID uint8 }`
   - `type bridge.Option func(*Client)`; `WithHTTPClient(*http.Client)`, `WithClock(func() time.Time)`, `WithBaseURL(string)`
-  - `func bridge.New(host string, creds Credentials, opts ...Option) (*Client, error)` — base URL `http://<host>`; `host` may include `:port`.
+  - `func bridge.New(host string, creds Credentials, opts ...Option) (*Client, error)` — base URL `http://<host>`; `host` must be an IP, optionally with `:port`.
   - `func (*Client) BridgeKey() []byte`
   - `func (*Client) Status(ctx) (*Status, error)`
   - `type bridge.Status struct{ BatteryPercentage loqed.Int; BatteryType string; BatteryTypeNumeric loqed.Int; BatteryVoltage loqed.Float; BoltState loqed.BoltState; BoltStateNumeric loqed.Int; BridgeMacWifi, BridgeMacBLE string; LockOnline loqed.Int; WebhooksNumber loqed.Int; IPAddress string; UpTimestamp loqed.Int; WifiStrength, BLEStrength loqed.Int }`
@@ -665,7 +913,7 @@ func newTestClient(t *testing.T, h http.Handler) *bridge.Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := bridge.New("unused",
+	c, err := bridge.New("192.0.2.1",
 		bridge.Credentials{BridgeKey: testBridgeKey, KeySecret: testKeySecret, LocalKeyID: 1},
 		bridge.WithBaseURL(srv.URL),
 		bridge.WithClock(func() time.Time { return fixedNow }),
@@ -732,6 +980,32 @@ func TestStatusAcceptsStringTypedNumbers(t *testing.T) {
 	}
 }
 
+func TestStatusMissingBoltStateIsUnknown(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"battery_percentage":78}`))
+	}))
+	st, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.BoltState != loqed.BoltUnknown {
+		t.Fatalf("bolt state %q", st.BoltState)
+	}
+}
+
+func TestNewRejectsHostnames(t *testing.T) {
+	for _, h := range []string{"loqed-bridge.local", "bad host:99999", "", "http://192.0.2.1"} {
+		if _, err := bridge.New(h, bridge.Credentials{}); err == nil {
+			t.Errorf("%q: expected error", h)
+		}
+	}
+	for _, h := range []string{"192.0.2.1", "192.0.2.1:8080", "[2001:db8::1]:80", "2001:db8::1"} {
+		if _, err := bridge.New(h, bridge.Credentials{}); err != nil {
+			t.Errorf("%q: %v", h, err)
+		}
+	}
+}
+
 func TestStatusInvalidJSON(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html>`))
@@ -743,16 +1017,16 @@ func TestStatusInvalidJSON(t *testing.T) {
 }
 
 func TestNewRejectsBadBase64(t *testing.T) {
-	if _, err := bridge.New("h", bridge.Credentials{BridgeKey: "%%%"}); err == nil {
+	if _, err := bridge.New("192.0.2.1", bridge.Credentials{BridgeKey: "%%%"}); err == nil {
 		t.Fatal("expected error for bad bridge key")
 	}
-	if _, err := bridge.New("h", bridge.Credentials{KeySecret: "%%%"}); err == nil {
+	if _, err := bridge.New("192.0.2.1", bridge.Credentials{KeySecret: "%%%"}); err == nil {
 		t.Fatal("expected error for bad key secret")
 	}
 }
 
 func TestBridgeKeyReturnsCopy(t *testing.T) {
-	c, err := bridge.New("h", bridge.Credentials{BridgeKey: testBridgeKey})
+	c, err := bridge.New("192.0.2.1", bridge.Credentials{BridgeKey: testBridgeKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +1041,7 @@ func TestBridgeKeyReturnsCopy(t *testing.T) {
 - [ ] **Step 2: Run to verify failure**
 
 Run: `go test ./bridge/`
-Expected: FAIL — `undefined: bridge.New`.
+Expected: FAIL — `no non-test Go files in …/bridge`.
 
 - [ ] **Step 3: Implement**
 
@@ -849,9 +1123,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -882,13 +1159,19 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-func WithHTTPClient(hc *http.Client) Option    { return func(c *Client) { c.hc = hc } }
-func WithClock(now func() time.Time) Option   { return func(c *Client) { c.now = now } }
-func WithBaseURL(base string) Option          { return func(c *Client) { c.base = strings.TrimRight(base, "/") } }
+func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
+func WithClock(now func() time.Time) Option { return func(c *Client) { c.now = now } }
+func WithBaseURL(base string) Option {
+	return func(c *Client) { c.base = strings.TrimRight(base, "/") }
+}
 
-// New creates a client for the bridge at host (an IP, optionally with :port).
-// Empty credentials are allowed; only Status works without them.
+// New creates a client for the bridge at host (an IP address, optionally
+// with :port; hostnames are rejected). Empty credentials are allowed; only
+// Status works without them.
 func New(host string, creds Credentials, opts ...Option) (*Client, error) {
+	if !validHost(host) {
+		return nil, fmt.Errorf("bridge: %q is not an IP address or IP:port", host)
+	}
 	bk, err := base64.StdEncoding.DecodeString(creds.BridgeKey)
 	if err != nil {
 		return nil, fmt.Errorf("bridge: invalid bridge key: %w", err)
@@ -922,9 +1205,24 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 	}
 	var st Status
 	if err := json.Unmarshal(body, &st); err != nil {
-		return nil, fmt.Errorf("%w: status: %v", loqed.ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: status: %w", loqed.ErrInvalidPayload, err)
+	}
+	if st.BoltState == "" {
+		st.BoltState = loqed.BoltUnknown
 	}
 	return &st, nil
+}
+
+func validHost(host string) bool {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		return false
+	}
+	_, err = netip.ParseAddr(h)
+	return err == nil
 }
 
 // do sends a request. header keys are set verbatim (not canonicalized):
@@ -936,7 +1234,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, heade
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
-		return nil, fmt.Errorf("bridge: building request: %w", err)
+		// The parse error would quote the URL, which may hold a signed command.
+		return nil, errors.New("bridge: invalid bridge address")
 	}
 	for k, v := range header {
 		req.Header[k] = []string{v}
@@ -953,7 +1252,7 @@ Note: `gofmt` will realign the three `With…` one-liners; run `gofmt -w bridge/
 - [ ] **Step 4: Run tests**
 
 Run: `gofmt -w bridge && go test ./bridge/ -v`
-Expected: PASS (5 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1181,7 +1480,7 @@ func (c *Client) Command(ctx context.Context, a Action) error {
 - [ ] **Step 5: Run tests**
 
 Run: `go test ./bridge/ -v`
-Expected: PASS (8 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -1201,7 +1500,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `hashHex`, `be32`, `be64`, `Client.do`, `Triggers`, `Webhook`.
-- Produces: `func (*Client) ListWebhooks(ctx) ([]Webhook, error)`, `func (*Client) CreateWebhook(ctx, url string, t Triggers) error`, `func (*Client) DeleteWebhook(ctx, id int) error`.
+- Produces: `func (*Client) ListWebhooks(ctx) ([]Webhook, error)`, `func (*Client) CreateWebhook(ctx, url string, t Triggers) error` (masks `t` to `AllTriggers`; body JSON without HTML escaping, like Python `json.dumps`), `func (*Client) DeleteWebhook(ctx, id int) error`.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1261,7 +1560,8 @@ func TestCreateWebhook(t *testing.T) {
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
+			t.Errorf("decode: %v", err) // t.Fatal must not run on the handler goroutine
+			return
 		}
 		if body["url"] != url {
 			t.Errorf("url %v", body["url"])
@@ -1306,6 +1606,30 @@ func TestDeleteWebhook(t *testing.T) {
 	}
 }
 
+func TestCreateWebhookBodyMatchesPython(t *testing.T) {
+	const url = "http://10.0.0.5:8099/webhook/a&b<c>"
+	var raw string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = string(b)
+	}))
+	// Stray bits above 511 must not reach the hash or the body.
+	if err := c.CreateWebhook(context.Background(), url, bridge.AllTriggers|1<<12); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(raw, `{"url":"`+url+`",`) || strings.HasSuffix(raw, "\n") {
+		t.Fatalf("body %q", raw)
+	}
+	var hash string
+	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hash = r.Header.Get("Hash") }))
+	if err := c.CreateWebhook(context.Background(), "http://10.0.0.5:8099/webhook/lock1", bridge.AllTriggers|1<<12); err != nil {
+		t.Fatal(err)
+	}
+	if hash != "8af7db84068792277430e940898c4c367655d52e74085b9901bd3e99c1dc41a4" {
+		t.Fatalf("stray trigger bits changed the hash: %s", hash)
+	}
+}
+
 type captureRT struct{ header http.Header }
 
 func (c *captureRT) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -1315,7 +1639,7 @@ func (c *captureRT) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestWebhookHeadersKeepUpperCaseNames(t *testing.T) {
 	rt := &captureRT{}
-	c, err := bridge.New("bridge", bridge.Credentials{BridgeKey: testBridgeKey},
+	c, err := bridge.New("192.0.2.1:8080", bridge.Credentials{BridgeKey: testBridgeKey},
 		bridge.WithHTTPClient(&http.Client{Transport: rt}),
 		bridge.WithClock(func() time.Time { return fixedNow }))
 	if err != nil {
@@ -1324,10 +1648,10 @@ func TestWebhookHeadersKeepUpperCaseNames(t *testing.T) {
 	if _, err := c.ListWebhooks(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := rt.header["TIMESTAMP"]; !ok {
+	if _, ok := rt.header["TIMESTAMP"]; !ok { //nolint:staticcheck // SA1008: the bridge needs the name verbatim
 		t.Errorf("TIMESTAMP header not sent verbatim: %v", rt.header)
 	}
-	if _, ok := rt.header["HASH"]; !ok {
+	if _, ok := rt.header["HASH"]; !ok { //nolint:staticcheck // SA1008: the bridge needs the name verbatim
 		t.Errorf("HASH header not sent verbatim: %v", rt.header)
 	}
 }
@@ -1346,6 +1670,7 @@ Expected: FAIL — `c.ListWebhooks undefined`.
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1375,7 +1700,7 @@ func (c *Client) ListWebhooks(ctx context.Context) ([]Webhook, error) {
 	}
 	var hooks []Webhook
 	if err := json.Unmarshal(body, &hooks); err != nil {
-		return nil, fmt.Errorf("%w: webhooks: %v", loqed.ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: webhooks: %w", loqed.ErrInvalidPayload, err)
 	}
 	return hooks, nil
 }
@@ -1396,7 +1721,11 @@ type webhookRequest struct {
 // CreateWebhook registers url for the selected triggers.
 // HASH = sha256(url | triggers as u32 BE | ts8 | bridgeKey).
 func (c *Client) CreateWebhook(ctx context.Context, url string, t Triggers) error {
-	body, err := json.Marshal(webhookRequest{
+	t &= AllTriggers // the body carries bits 0..8 only; the hash must agree
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // match Python json.dumps: '&' stays literal
+	err := enc.Encode(webhookRequest{
 		URL:                   url,
 		StateChangedOpen:      t.bit(TriggerStateChangedOpen),
 		StateChangedLatch:     t.bit(TriggerStateChangedLatch),
@@ -1411,6 +1740,7 @@ func (c *Client) CreateWebhook(ctx context.Context, url string, t Triggers) erro
 	if err != nil {
 		return err
 	}
+	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	_, err = c.do(ctx, http.MethodPost, "/webhooks", body, c.signedHeaders([]byte(url), be32(uint32(t))))
 	return err
 }
@@ -1424,8 +1754,8 @@ func (c *Client) DeleteWebhook(ctx context.Context, id int) error {
 
 - [ ] **Step 4: Run tests**
 
-Run: `go test ./bridge/ -v`
-Expected: PASS (13 tests).
+Run: `gofmt -l bridge && go test ./bridge/ -v`
+Expected: PASS (16 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1444,12 +1774,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `bridge/events.go`, `bridge/events_test.go`
 
 **Interfaces:**
-- Consumes: `hashHex`, `be64`, `loqed.ParseBoltState`, flex types.
+- Consumes: `hashHex`, `be64`, `loqed.ParseBoltState`, `loqed.ReachedState`, `loqed.IsGoToState`, `loqed.GoToTarget`, flex types.
 - Produces:
   - `const bridge.MaxClockSkew = 10 * time.Second`
-  - `func bridge.ParseEvent(bridgeKey, body []byte, hash, timestamp string, now time.Time) (Event, error)` — errors: `ErrBadSignature` (missing/malformed headers, wrong hash), `ErrStaleTimestamp` (message includes skew in seconds), `ErrInvalidPayload`.
+  - `func bridge.ParseEvent(bridgeKey, body []byte, hash, timestamp string, now time.Time) (Event, error)` — checks HASH first, then skew in whole seconds (`now.Unix()-ts`, |skew| ≤ 10). Errors: `ErrBadSignature` (missing/malformed headers, wrong hash — also when the timestamp is stale), `ErrStaleTimestamp` (only with a valid hash; message includes skew in seconds), `ErrInvalidPayload`.
+  - Classification: `event_type` starting with `GO_TO_STATE_` → `GoToStateEvent` (target from `go_to_state`, else from the event-type suffix); any other `event_type` → `StateReachedEvent` with `BoltState`/`Jammed` from `loqed.ReachedState(event_type)`.
   - `type Event interface{ isEvent() }` implemented by:
-    - `StateReachedEvent{MacWifi, MacBLE, EventType string; RequestedState loqed.BoltState; KeyLocalID *int}`
+    - `StateReachedEvent{MacWifi, MacBLE, EventType string; BoltState loqed.BoltState; Jammed bool; RequestedState loqed.BoltState; KeyLocalID *int}` — `BoltState` is the reached state; `RequestedState` is informational only.
     - `GoToStateEvent{MacWifi, MacBLE, EventType string; GoToState loqed.BoltState; KeyLocalID *int}`
     - `BatteryEvent{MacWifi, MacBLE, BatteryType string; BatteryPercentage int; WifiStrength, BLEStrength *int}`
     - `OnlineEvent{MacWifi, MacBLE string; WifiStrength, BLEStrength *int}`
@@ -1494,7 +1825,7 @@ func TestParseEventGoldenStateReached(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T", ev)
 	}
-	if sr.EventType != "STATE_CHANGED_NIGHT_LOCK" || sr.RequestedState != loqed.BoltNightLock ||
+	if sr.EventType != "STATE_CHANGED_NIGHT_LOCK" || sr.BoltState != loqed.BoltNightLock || sr.Jammed ||
 		sr.KeyLocalID == nil || *sr.KeyLocalID != 255 || sr.MacWifi != "aa" || sr.MacBLE != "bb" {
 		t.Fatalf("got %+v", sr)
 	}
@@ -1518,6 +1849,8 @@ func TestParseEventSignatureErrors(t *testing.T) {
 		{"missing timestamp", goldenEventHash, "", fixedNow, loqed.ErrBadSignature},
 		{"malformed timestamp", goldenEventHash, "abc", fixedNow, loqed.ErrBadSignature},
 		{"wrong hash", strings.Repeat("0", 64), "1700000000", fixedNow, loqed.ErrBadSignature},
+		{"wrong hash and stale", strings.Repeat("0", 64), "1700000000", fixedNow.Add(time.Hour), loqed.ErrBadSignature},
+		{"negative timestamp", goldenEventHash, "-5", fixedNow, loqed.ErrBadSignature},
 		{"too old", goldenEventHash, "1700000000", fixedNow.Add(11 * time.Second), loqed.ErrStaleTimestamp},
 		{"too new", goldenEventHash, "1700000000", fixedNow.Add(-11 * time.Second), loqed.ErrStaleTimestamp},
 	}
@@ -1527,9 +1860,9 @@ func TestParseEventSignatureErrors(t *testing.T) {
 			t.Errorf("%s: got %v want %v", c.name, err, c.want)
 		}
 	}
-	// Exactly at the window edge is accepted.
-	if _, err := bridge.ParseEvent(k, body, goldenEventHash, "1700000000", fixedNow.Add(10*time.Second)); err != nil {
-		t.Errorf("10s skew should pass: %v", err)
+	// Whole seconds are compared, like loqedAPI: 10.9 s is still accepted.
+	if _, err := bridge.ParseEvent(k, body, goldenEventHash, "1700000000", fixedNow.Add(10900*time.Millisecond)); err != nil {
+		t.Errorf("10.9s skew should pass: %v", err)
 	}
 }
 
@@ -1550,8 +1883,8 @@ func sign(t *testing.T, body string) (string, string) {
 
 func TestParseEventFamilies(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
+		name  string
+		body  string
 		check func(t *testing.T, ev bridge.Event)
 	}{
 		{"go to state", `{"go_to_state":"DAY_LOCK","go_to_state_numeric":2,"mac_wifi":"a","mac_ble":"b","event_type":"GO_TO_STATE_TWIST_ASSIST_LATCH","key_local_id":"3"}`,
@@ -1564,15 +1897,30 @@ func TestParseEventFamilies(t *testing.T) {
 		{"state reached null key", `{"requested_state":"OPEN","event_type":"STATE_CHANGED_OPEN_REMOTE","key_local_id":null}`,
 			func(t *testing.T, ev bridge.Event) {
 				s := ev.(bridge.StateReachedEvent)
-				if s.RequestedState != loqed.BoltOpen || s.KeyLocalID != nil {
+				if s.BoltState != loqed.BoltOpen || s.KeyLocalID != nil {
 					t.Fatalf("%+v", s)
 				}
 			}},
-		{"motor stall", `{"requested_state":"UNKNOWN","event_type":"MOTOR_STALL"}`,
+		// HA fixture nightlock_reached.json: requested NIGHT_LOCK but the bolt latched.
+		{"reached state comes from event_type", `{"requested_state":"NIGHT_LOCK","event_type":"STATE_CHANGED_LATCH","key_local_id":1}`,
 			func(t *testing.T, ev bridge.Event) {
 				s := ev.(bridge.StateReachedEvent)
-				if s.EventType != "MOTOR_STALL" || s.RequestedState != loqed.BoltUnknown || s.KeyLocalID != nil {
+				if s.BoltState != loqed.BoltDayLock || s.RequestedState != loqed.BoltNightLock {
 					t.Fatalf("%+v", s)
+				}
+			}},
+		{"motor stall never reports the requested state", `{"requested_state":"NIGHT_LOCK","event_type":"MOTOR_STALL","key_local_id":2}`,
+			func(t *testing.T, ev bridge.Event) {
+				s := ev.(bridge.StateReachedEvent)
+				if s.EventType != "MOTOR_STALL" || !s.Jammed || s.BoltState != loqed.BoltUnknown || *s.KeyLocalID != 2 {
+					t.Fatalf("%+v", s)
+				}
+			}},
+		{"go to state without go_to_state field", `{"event_type":"GO_TO_STATE_TOUCH_TO_LOCK","key_local_id":255}`,
+			func(t *testing.T, ev bridge.Event) {
+				g := ev.(bridge.GoToStateEvent)
+				if g.GoToState != loqed.BoltNightLock || *g.KeyLocalID != 255 {
+					t.Fatalf("%+v", g)
 				}
 			}},
 		{"battery", `{"battery_type":"1","battery_percentage":"88","mac_wifi":"a","mac_ble":"b"}`,
@@ -1618,14 +1966,47 @@ func TestParseEventInvalidPayload(t *testing.T) {
 }
 ```
 
-Also add to `bridge/helpers_test.go` (test-only re-implementation so the tests do not depend on unexported helpers):
+Replace `bridge/helpers_test.go` with this version, which adds a test-only re-implementation of the hash so the tests do not depend on unexported helpers:
+
+`bridge/helpers_test.go`:
 
 ```go
+package bridge_test
+
 import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/t3hk0d3/go-loqed/bridge"
 )
+
+// Golden-vector inputs; see testdata/gen_vectors.py.
+const (
+	testBridgeKey = "Ym9uam91ciBtb25kZQ=="
+	testKeySecret = "SGFsbG8gd2VyZWxk"
+)
+
+var fixedNow = time.Unix(1700000000, 0)
+
+func newTestClient(t *testing.T, h http.Handler) *bridge.Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	c, err := bridge.New("192.0.2.1",
+		bridge.Credentials{BridgeKey: testBridgeKey, KeySecret: testKeySecret, LocalKeyID: 1},
+		bridge.WithBaseURL(srv.URL),
+		bridge.WithClock(func() time.Time { return fixedNow }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
 
 func hashForTest(b []byte) string {
 	s := sha256.Sum256(b)
@@ -1634,8 +2015,6 @@ func hashForTest(b []byte) string {
 
 func be64ForTest(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
 ```
-
-(Merge these imports into the existing import block of `helpers_test.go`.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1667,14 +2046,19 @@ const MaxClockSkew = 10 * time.Second
 type Event interface{ isEvent() }
 
 // StateReachedEvent: the bolt reached a state (or MOTOR_STALL).
+// BoltState is derived from EventType (see loqed.ReachedState);
+// RequestedState is only what was asked for.
 type StateReachedEvent struct {
 	MacWifi, MacBLE string
 	EventType       string
+	BoltState       loqed.BoltState
+	Jammed          bool
 	RequestedState  loqed.BoltState
 	KeyLocalID      *int
 }
 
-// GoToStateEvent: the bolt started moving towards a state.
+// GoToStateEvent: the bolt started moving towards a state
+// (event_type GO_TO_STATE_*).
 type GoToStateEvent struct {
 	MacWifi, MacBLE string
 	EventType       string
@@ -1684,11 +2068,11 @@ type GoToStateEvent struct {
 
 // BatteryEvent: battery report. BatteryPercentage -1 means the lock is offline.
 type BatteryEvent struct {
-	MacWifi, MacBLE string
-	BatteryType     string
+	MacWifi, MacBLE   string
+	BatteryType       string
 	BatteryPercentage int
-	WifiStrength    *int
-	BLEStrength     *int
+	WifiStrength      *int
+	BLEStrength       *int
 }
 
 // OnlineEvent: signal report. BLEStrength -1 means the lock is offline.
@@ -1717,40 +2101,48 @@ type rawEvent struct {
 }
 
 // ParseEvent verifies and decodes a webhook POSTed by the bridge.
-// hash and timestamp are the HASH and TIMESTAMP header values.
+// hash and timestamp are the HASH and TIMESTAMP header values. The hash is
+// checked before the timestamp, so only authentic requests can report clock
+// skew. Skew is compared in whole seconds, like loqedAPI.
 func ParseEvent(bridgeKey, body []byte, hash, timestamp string, now time.Time) (Event, error) {
 	hash = strings.ToLower(strings.TrimSpace(hash))
 	ts, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
-	if err != nil || hash == "" {
+	if err != nil || hash == "" || ts < 0 {
 		return nil, fmt.Errorf("%w: missing or malformed TIMESTAMP/HASH", loqed.ErrBadSignature)
-	}
-	skew := now.Sub(time.Unix(ts, 0))
-	if skew > MaxClockSkew || skew < -MaxClockSkew {
-		return nil, fmt.Errorf("%w: clock skew %s (check NTP on this host and the bridge)", loqed.ErrStaleTimestamp, skew.Round(time.Second))
 	}
 	want := hashHex(body, be64(uint64(ts)), bridgeKey)
 	if subtle.ConstantTimeCompare([]byte(want), []byte(hash)) != 1 {
 		return nil, fmt.Errorf("%w: HASH mismatch", loqed.ErrBadSignature)
 	}
+	skew := now.Unix() - ts
+	if skew > int64(MaxClockSkew/time.Second) || skew < -int64(MaxClockSkew/time.Second) {
+		return nil, fmt.Errorf("%w: clock skew %ds (check NTP on this host and the bridge)", loqed.ErrStaleTimestamp, skew)
+	}
 	var r rawEvent
 	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, fmt.Errorf("%w: %v", loqed.ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: %w", loqed.ErrInvalidPayload, err)
 	}
 	return classify(r)
 }
 
 func classify(r rawEvent) (Event, error) {
 	switch {
-	case r.EventType != nil && r.GoToState != nil:
+	case r.EventType != nil && loqed.IsGoToState(*r.EventType):
+		goTo := ""
+		if r.GoToState != nil {
+			goTo = string(*r.GoToState)
+		}
 		return GoToStateEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, EventType: *r.EventType,
-			GoToState: loqed.ParseBoltState(string(*r.GoToState)), KeyLocalID: keyID(r.KeyLocalID)}, nil
+			GoToState: loqed.GoToTarget(*r.EventType, goTo), KeyLocalID: keyID(r.KeyLocalID)}, nil
 	case r.EventType != nil:
 		requested := ""
 		if r.RequestedState != nil {
 			requested = string(*r.RequestedState)
 		}
+		state, jammed := loqed.ReachedState(*r.EventType)
 		return StateReachedEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, EventType: *r.EventType,
-			RequestedState: loqed.ParseBoltState(requested), KeyLocalID: keyID(r.KeyLocalID)}, nil
+			BoltState: state, Jammed: jammed, RequestedState: loqed.ParseBoltState(requested),
+			KeyLocalID: keyID(r.KeyLocalID)}, nil
 	case r.BatteryPercentage != nil:
 		ev := BatteryEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, BatteryPercentage: int(*r.BatteryPercentage),
 			WifiStrength: intPtr(r.WifiStrength), BLEStrength: intPtr(r.BLEStrength)}
@@ -1786,7 +2178,7 @@ func intPtr(v *loqed.Int) *int {
 - [ ] **Step 4: Run tests**
 
 Run: `gofmt -w bridge && go test ./bridge/ -v`
-Expected: PASS.
+Expected: PASS (22 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1811,7 +2203,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `func cloud.New(token string, opts ...Option) *Client`; `WithBaseURL(string)`, `WithHTTPClient(*http.Client)` (default client: 15 s timeout, does not follow redirects).
   - `func (*Client) ListLocks(ctx) ([]Lock, error)`
   - `func (*Client) Command(ctx, lockID string, s loqed.BoltState) error` — only `open`, `day_lock`, `night_lock`.
-  - `type cloud.Lock struct{ ID, Name, ModelName string; BatteryPercentage int; BatteryType string; BoltState loqed.BoltState; PartyMode, GuestAccessMode, TwistAssist, TouchToConnect bool; LockDirection, MortiseLockType string; SupportedLockStates []string; Online *bool; BridgeIP, BridgeHostname, BridgeMacWifi string; LocalID *int; KeySecret, BridgeKey, BackendKey string }`; `func (Lock) HasLocalCredentials() bool`.
+  - `type cloud.Lock struct{ ID, Name, ModelName string; BatteryPercentage int; BatteryType string; BoltState loqed.BoltState; PartyMode, GuestAccessMode, TwistAssist, TouchToConnect bool; LockDirection, MortiseLockType string; SupportedLockStates []string; Online *bool; BridgeIP, BridgeHostname, BridgeMacWifi string; LocalID *int; KeySecret, BridgeKey, BackendKey string }`; `func (Lock) HasLocalCredentials() bool` (IP, both keys, and `LocalID` in 0..255).
+  - A 2xx HTML body (an injected client followed the login redirect) is `ErrUnauthorized`, never success.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1898,7 +2291,7 @@ func TestListLocksRateLimited(t *testing.T) {
 }
 
 func TestListLocksInvalidJSON(t *testing.T) {
-	c := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`<html>`)) })
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"data":"nope"}`)) })
 	if _, err := c.ListLocks(context.Background()); !errors.Is(err, loqed.ErrInvalidPayload) {
 		t.Fatalf("got %v", err)
 	}
@@ -1912,11 +2305,35 @@ func TestCommand(t *testing.T) {
 		}
 		path = r.URL.EscapedPath()
 	})
-	if err := c.Command(context.Background(), "Yq1g/K4", loqed.BoltNightLock); err != nil {
+	if err := c.Command(context.Background(), "Yq1gK4oeE9KWe0ByxjX2", loqed.BoltNightLock); err != nil {
 		t.Fatal(err)
 	}
-	if path != "/api/locks/Yq1g%2FK4/bolt_state/night_lock" {
+	if path != "/api/locks/Yq1gK4oeE9KWe0ByxjX2/bolt_state/night_lock" {
 		t.Fatalf("path %q", path)
+	}
+}
+
+func TestCommandFollowedRedirectToLoginIsUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			_, _ = w.Write([]byte("<!DOCTYPE html><html>login</html>"))
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	// A caller-supplied client that follows redirects.
+	c := cloud.New("tok", cloud.WithBaseURL(srv.URL), cloud.WithHTTPClient(http.DefaultClient))
+	if err := c.Command(context.Background(), "x", loqed.BoltOpen); !errors.Is(err, loqed.ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestHasLocalCredentialsRequiresValidLocalID(t *testing.T) {
+	id := 256
+	l := cloud.Lock{BridgeIP: "192.0.2.1", BridgeKey: "a", KeySecret: "b", LocalID: &id}
+	if l.HasLocalCredentials() {
+		t.Fatal("local_id 256 cannot be a key id")
 	}
 }
 
@@ -1931,7 +2348,7 @@ func TestCommandRejectsUnknownState(t *testing.T) {
 - [ ] **Step 2: Run to verify failure**
 
 Run: `go test ./cloud/`
-Expected: FAIL — `undefined: cloud.New`.
+Expected: FAIL — `no non-test Go files in …/cloud`.
 
 - [ ] **Step 3: Implement**
 
@@ -1943,8 +2360,10 @@ Expected: FAIL — `undefined: cloud.New`.
 package cloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -2017,7 +2436,8 @@ type Lock struct {
 
 // HasLocalCredentials reports whether the lock can be driven via its bridge.
 func (l Lock) HasLocalCredentials() bool {
-	return l.BridgeIP != "" && l.BridgeKey != "" && l.KeySecret != "" && l.LocalID != nil
+	return l.BridgeIP != "" && l.BridgeKey != "" && l.KeySecret != "" &&
+		l.LocalID != nil && *l.LocalID >= 0 && *l.LocalID <= 255
 }
 
 type rawLock struct {
@@ -2079,7 +2499,7 @@ func (c *Client) ListLocks(ctx context.Context) ([]Lock, error) {
 		Data []rawLock `json:"data"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("%w: locks: %v", loqed.ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: locks: %w", loqed.ErrInvalidPayload, err)
 	}
 	locks := make([]Lock, 0, len(resp.Data))
 	for _, r := range resp.Data {
@@ -2102,18 +2522,27 @@ func (c *Client) Command(ctx context.Context, lockID string, s loqed.BoltState) 
 func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("cloud: building request: %w", err)
+		return nil, errors.New("cloud: invalid base URL or lock id")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
-	return transport.Do(c.hc, req)
+	body, err := transport.Do(c.hc, req)
+	if err != nil {
+		return nil, err
+	}
+	// An injected client that follows redirects lands on the HTML login
+	// page with 200; never report that as success.
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '<' {
+		return nil, fmt.Errorf("%w: received an HTML page (login?)", loqed.ErrUnauthorized)
+	}
+	return body, nil
 }
 ```
 
 - [ ] **Step 4: Run tests**
 
 Run: `gofmt -w cloud && go test ./cloud/ -v`
-Expected: PASS (6 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2134,7 +2563,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Produces:
   - `type cloud.WebhookKind int` with `KindStateReached`, `KindGoToState`, `KindSignal`, `KindOnline`.
-  - `type cloud.WebhookEvent struct{ Kind WebhookKind; LockID, EventType string; RequestedState, GoToState loqed.BoltState; KeyLocalID *int; KeyNameUser string; BatteryPercentage, WifiStrength, BLEStrength *int; Online *bool }`
+  - `type cloud.WebhookEvent struct{ Kind WebhookKind; LockID, EventType string; BoltState loqed.BoltState; Jammed bool; RequestedState, GoToState loqed.BoltState; KeyLocalID *int; KeyNameUser string; BatteryPercentage, WifiStrength, BLEStrength *int; Online *bool }` — same classification rules as `bridge.ParseEvent` (`BoltState`/`Jammed` from `event_type`; `GO_TO_STATE_*` prefix → `KindGoToState`); `KeyLocalID` nil when outside 0..255.
   - `func cloud.ParseWebhook(body []byte) (WebhookEvent, error)` — `ErrInvalidPayload` when JSON is invalid, `lock_id` is missing, or no known family matches.
 
 - [ ] **Step 1: Write failing tests**
@@ -2168,7 +2597,7 @@ func TestParseWebhookStateReached(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ev.Kind != cloud.KindStateReached || ev.LockID != "Yq1g" || ev.EventType != "STATE_CHANGED_LATCH" ||
-		ev.RequestedState != loqed.BoltDayLock || *ev.KeyLocalID != 3 || ev.KeyNameUser != "Front door" {
+		ev.BoltState != loqed.BoltDayLock || *ev.KeyLocalID != 3 || ev.KeyNameUser != "Front door" {
 		t.Fatalf("%+v", ev)
 	}
 }
@@ -2198,6 +2627,19 @@ func TestParseWebhookFamilies(t *testing.T) {
 	o, err := cloud.ParseWebhook([]byte(cloudOnline))
 	if err != nil || o.Kind != cloud.KindOnline || o.Online == nil || !*o.Online {
 		t.Fatalf("online: %+v %v", o, err)
+	}
+}
+
+func TestParseWebhookStateFromEventType(t *testing.T) {
+	ev, err := cloud.ParseWebhook([]byte(`{"requested_state":"NIGHT_LOCK","event_type":"MOTOR_STALL","lock_id":"x","key_local_id":999}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ev.Jammed || ev.BoltState != loqed.BoltUnknown || ev.RequestedState != loqed.BoltNightLock {
+		t.Fatalf("%+v", ev)
+	}
+	if ev.KeyLocalID != nil {
+		t.Fatalf("out-of-range key id kept: %d", *ev.KeyLocalID)
 	}
 }
 
@@ -2254,8 +2696,10 @@ type WebhookEvent struct {
 	Kind              WebhookKind
 	LockID            string
 	EventType         string
-	RequestedState    loqed.BoltState
-	GoToState         loqed.BoltState
+	BoltState         loqed.BoltState // reached state, derived from EventType (KindStateReached)
+	Jammed            bool            // MOTOR_STALL
+	RequestedState    loqed.BoltState // raw requested_state; informational only
+	GoToState         loqed.BoltState // movement target (KindGoToState)
 	KeyLocalID        *int
 	KeyNameUser       string
 	BatteryPercentage *int
@@ -2282,7 +2726,7 @@ type rawWebhook struct {
 func ParseWebhook(body []byte) (WebhookEvent, error) {
 	var r rawWebhook
 	if err := json.Unmarshal(body, &r); err != nil {
-		return WebhookEvent{}, fmt.Errorf("%w: %v", loqed.ErrInvalidPayload, err)
+		return WebhookEvent{}, fmt.Errorf("%w: %w", loqed.ErrInvalidPayload, err)
 	}
 	if r.LockID == "" {
 		return WebhookEvent{}, fmt.Errorf("%w: cloud webhook without lock_id", loqed.ErrInvalidPayload)
@@ -2293,14 +2737,18 @@ func ParseWebhook(body []byte) (WebhookEvent, error) {
 		ev.KeyLocalID = intPtr(r.KeyLocalID)
 	}
 	switch {
-	case r.EventType != nil && r.GoToState != nil:
-		ev.Kind, ev.EventType, ev.GoToState = KindGoToState, *r.EventType, loqed.ParseBoltState(string(*r.GoToState))
+	case r.EventType != nil && loqed.IsGoToState(*r.EventType):
+		goTo := ""
+		if r.GoToState != nil {
+			goTo = string(*r.GoToState)
+		}
+		ev.Kind, ev.EventType, ev.GoToState = KindGoToState, *r.EventType, loqed.GoToTarget(*r.EventType, goTo)
 	case r.EventType != nil:
 		ev.Kind, ev.EventType = KindStateReached, *r.EventType
+		ev.BoltState, ev.Jammed = loqed.ReachedState(*r.EventType)
+		ev.RequestedState = loqed.BoltUnknown
 		if r.RequestedState != nil {
 			ev.RequestedState = loqed.ParseBoltState(string(*r.RequestedState))
-		} else {
-			ev.RequestedState = loqed.BoltUnknown
 		}
 	case r.Online != nil:
 		v := bool(*r.Online)
@@ -2325,7 +2773,7 @@ func intPtr(v *loqed.Int) *int {
 - [ ] **Step 4: Run tests**
 
 Run: `go test ./cloud/ -v`
-Expected: PASS (10 tests).
+Expected: PASS (13 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2344,18 +2792,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `cloud/portal/portal.go`, `cloud/portal/fake_test.go`, `cloud/portal/portal_test.go`
 
 **Interfaces:**
-- Consumes: `transport.Do`, `transport.CheckStatus`, `transport.MaxBody`, `loqed.String`, sentinels.
+- Consumes: `transport.Send`, `transport.CheckStatus`, `loqed.String`, sentinels.
 - Produces:
   - `const portal.DefaultBaseURL = "https://integrations.production.loqed.com"`
   - `func portal.New(opts ...Option) *Client`; `WithBaseURL(string)`, `WithTransport(http.RoundTripper)`
-  - `func (*Client) Login(ctx, email, password string) (*Session, error)` — `ErrUnauthorized` on rejected credentials.
+  - `func (*Client) Login(ctx, email, password string) (*Session, error)` — `ErrUnauthorized` on rejected credentials; `ErrInvalidPayload` on CSRF rejection (419) or an unrecognized page.
+  - Any session call that lands on the `Auth/Login` page returns `ErrUnauthorized` (session expired).
   - `type portal.Token struct{ ID, Name, Value string }`, `type portal.TokenInfo struct{ ID, Name string }`
   - `func (*Session) CreateToken(ctx, name string) (Token, error)`
   - `func (*Session) ListTokens(ctx) ([]TokenInfo, error)`
   - `func (*Session) RevokeToken(ctx, id string) error`
   - `func (*Session) Logout(ctx) error`
 
-Protocol (spec §2.3): Laravel + Inertia. `GET /login` (HTML, `data-page` attribute carries `{"version":...}`; sets `XSRF-TOKEN` + session cookies). Subsequent calls send `X-Inertia: true`, `X-Inertia-Version`, `X-Requested-With: XMLHttpRequest`, and `X-XSRF-TOKEN` = URL-decoded `XSRF-TOKEN` cookie. Redirects are followed (cookies via jar). `409` + `X-Inertia-Location` = asset version changed → reload version, retry once. `419` = CSRF/session expired → `ErrUnauthorized`.
+Protocol (spec §2.3): Laravel + Inertia. `GET /login` returns HTML whose `data-page` attribute carries `{"version":...}` and whose `<meta name="csrf-token" content="…">` carries the CSRF token; it sets the session cookie (and maybe `XSRF-TOKEN` — the captured real response had none). Subsequent calls send `X-Inertia: true`, `X-Inertia-Version`, `X-Requested-With: XMLHttpRequest`, `X-CSRF-TOKEN` = meta token and, if the cookie exists, `X-XSRF-TOKEN` = `decodeURIComponent(cookie)` (`url.PathUnescape`, which keeps `+`). Redirects are followed (cookies via jar). Requests are **never re-sent**: Inertia version-checks only GETs, so a `409` + `X-Inertia-Location` after a mutation arrives on the redirected GET; the client then loads that location as HTML, whose props include the re-flashed data (e.g. `accessToken`). `419` = CSRF rejected → `ErrInvalidPayload` (not a password problem). Errors never include portal response bodies.
 
 - [ ] **Step 1: Write the fake portal**
 
@@ -2379,16 +2828,20 @@ import (
 type fakeToken struct{ ID, Name, Value string }
 
 // fakePortal mimics the Laravel/Inertia integrations portal closely enough
-// to exercise cookies, XSRF, redirects, version mismatches and flashes.
+// to exercise cookies, CSRF, redirects, version mismatches and flashes.
 type fakePortal struct {
-	mu        sync.Mutex
-	version   string
-	email     string
-	password  string
-	sessions  map[string]*fakeSession
-	tokens    []fakeToken
-	nextID    int
+	mu               sync.Mutex
+	version          string
+	email            string
+	password         string
+	sessions         map[string]*fakeSession
+	tokens           []fakeToken
+	nextID           int
+	createCalls      int
 	brokenTokensPage bool
+	noXSRFCookie     bool // the real portal was observed without an XSRF-TOKEN cookie
+	rejectCSRF       bool // answer every mutation with 419
+	bumpOnCreate     bool // change the asset version while handling a create
 }
 
 type fakeSession struct {
@@ -2405,7 +2858,8 @@ func newFakePortal(t *testing.T) (*fakePortal, *httptest.Server) {
 	return f, srv
 }
 
-func (f *fakePortal) xsrfFor(sid string) string { return "xsrf+/=" + sid } // characters that need URL-encoding
+// csrfFor contains characters that need URL-encoding in a cookie.
+func (f *fakePortal) csrfFor(sid string) string { return "csrf+/=" + sid }
 
 func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
@@ -2422,14 +2876,21 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sessions[sid] = sess
 	}
 	http.SetCookie(w, &http.Cookie{Name: "laravel_session", Value: sid, Path: "/"})
-	http.SetCookie(w, &http.Cookie{Name: "XSRF-TOKEN", Value: url.QueryEscape(f.xsrfFor(sid)), Path: "/"})
+	if !f.noXSRFCookie {
+		http.SetCookie(w, &http.Cookie{Name: "XSRF-TOKEN", Value: url.QueryEscape(f.csrfFor(sid)), Path: "/"})
+	}
 
-	if r.Method != http.MethodGet && r.Header.Get("X-XSRF-TOKEN") != f.xsrfFor(sid) {
-		w.WriteHeader(419)
-		return
+	// Laravel's VerifyCsrfToken accepts X-CSRF-TOKEN (meta) or X-XSRF-TOKEN (cookie).
+	if r.Method != http.MethodGet {
+		valid := r.Header.Get("X-CSRF-TOKEN") == f.csrfFor(sid) || r.Header.Get("X-XSRF-TOKEN") == f.csrfFor(sid)
+		if f.rejectCSRF || !valid {
+			w.WriteHeader(419)
+			return
+		}
 	}
 	inertia := r.Header.Get("X-Inertia") == "true"
 	if inertia && r.Method == http.MethodGet && r.Header.Get("X-Inertia-Version") != f.version {
+		// Real Inertia reflashes session data, so the flash survives the 409.
 		w.Header().Set("X-Inertia-Location", r.URL.Path)
 		w.WriteHeader(http.StatusConflict)
 		return
@@ -2442,7 +2903,7 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errs == nil {
 			errs = map[string]string{}
 		}
-		f.render(w, inertia, "Auth/Login", map[string]any{"errors": errs})
+		f.render(w, sid, inertia, "Auth/Login", map[string]any{"errors": errs})
 	case r.URL.Path == "/login" && r.Method == http.MethodPost:
 		var body struct{ Email, Password string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -2456,7 +2917,7 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case !sess.authed:
 		http.Redirect(w, r, "/login", http.StatusFound)
 	case r.URL.Path == "/dashboard":
-		f.render(w, inertia, "Dashboard", map[string]any{"errors": []any{}})
+		f.render(w, sid, inertia, "Dashboard", map[string]any{"errors": []any{}})
 	case r.URL.Path == "/personal-access-tokens" && r.Method == http.MethodGet:
 		list := []map[string]any{}
 		for _, t := range f.tokens {
@@ -2471,14 +2932,18 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.brokenTokensPage {
 			component = "SomethingElse"
 		}
-		f.render(w, inertia, component, props)
+		f.render(w, sid, inertia, component, props)
 	case r.URL.Path == "/create-personal-access-tokens" && r.Method == http.MethodPost:
 		var body struct{ Name string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.createCalls++
 		f.nextID++
 		tok := fakeToken{ID: fmt.Sprintf("%040d", f.nextID), Name: body.Name, Value: fmt.Sprintf("pat-%d", f.nextID)}
 		f.tokens = append(f.tokens, tok)
 		sess.flashToken = tok.Value
+		if f.bumpOnCreate {
+			f.version += "-new"
+		}
 		http.Redirect(w, r, "/personal-access-tokens", http.StatusFound)
 	case strings.HasPrefix(r.URL.Path, "/personal-access-tokens/") && r.Method == http.MethodDelete:
 		id := strings.TrimPrefix(r.URL.Path, "/personal-access-tokens/")
@@ -2498,7 +2963,7 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fakePortal) render(w http.ResponseWriter, inertia bool, component string, props map[string]any) {
+func (f *fakePortal) render(w http.ResponseWriter, sid string, inertia bool, component string, props map[string]any) {
 	page, _ := json.Marshal(map[string]any{"component": component, "props": props, "url": "/", "version": f.version})
 	if inertia {
 		w.Header().Set("X-Inertia", "true")
@@ -2507,7 +2972,15 @@ func (f *fakePortal) render(w http.ResponseWriter, inertia bool, component strin
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
-	fmt.Fprintf(w, `<!DOCTYPE html><html><body><div id="app" data-page="%s"></div></body></html>`, html.EscapeString(string(page)))
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta name="csrf-token" content="%s"></head>`+
+		`<body><div id="app" data-page="%s"></div></body></html>`,
+		html.EscapeString(f.csrfFor(sid)), html.EscapeString(string(page)))
+}
+
+func (f *fakePortal) set(fn func(*fakePortal)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
 }
 
 func (f *fakePortal) tokenNames() []string {
@@ -2537,9 +3010,12 @@ import (
 	"github.com/t3hk0d3/go-loqed/cloud/portal"
 )
 
-func login(t *testing.T) (*fakePortal, *portal.Session) {
+func login(t *testing.T, setup ...func(*fakePortal)) (*fakePortal, *portal.Session) {
 	t.Helper()
 	f, srv := newFakePortal(t)
+	for _, fn := range setup {
+		f.set(fn)
+	}
 	s, err := portal.New(portal.WithBaseURL(srv.URL)).Login(context.Background(), "me@example.com", "s3cret")
 	if err != nil {
 		t.Fatal(err)
@@ -2555,15 +3031,31 @@ func TestLoginRejectsBadPassword(t *testing.T) {
 	}
 }
 
+func TestLoginWithoutXSRFCookieUsesMetaToken(t *testing.T) {
+	_, s := login(t, func(f *fakePortal) { f.noXSRFCookie = true })
+	if _, err := s.CreateToken(context.Background(), "x"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCSRFRejectionIsNotReportedAsBadPassword(t *testing.T) {
+	f, srv := newFakePortal(t)
+	f.set(func(f *fakePortal) { f.rejectCSRF = true })
+	_, err := portal.New(portal.WithBaseURL(srv.URL)).Login(context.Background(), "me@example.com", "s3cret")
+	if !errors.Is(err, loqed.ErrInvalidPayload) || errors.Is(err, loqed.ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestCreateListRevokeToken(t *testing.T) {
 	f, s := login(t)
 	ctx := context.Background()
 
-	tok, err := s.CreateToken(ctx, "loqed-mqtt (nas)")
+	tok, err := s.CreateToken(ctx, "loqed-mqtt 1a2b3c4d")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok.Value != "pat-1" || tok.Name != "loqed-mqtt (nas)" || tok.ID == "" {
+	if tok.Value != "pat-1" || tok.Name != "loqed-mqtt 1a2b3c4d" || tok.ID == "" {
 		t.Fatalf("token %+v", tok)
 	}
 
@@ -2602,21 +3094,48 @@ func TestCreateTokenFindsIDAmongSameNamedTokens(t *testing.T) {
 	}
 }
 
-func TestVersionMismatchIsRetried(t *testing.T) {
+func TestVersionMismatchOnGetLoadsPage(t *testing.T) {
 	f, s := login(t)
-	f.mu.Lock()
-	f.version = "v2"
-	f.mu.Unlock()
+	f.set(func(f *fakePortal) { f.version = "v2" })
 	if _, err := s.ListTokens(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// Inertia version-checks the GET that follows the create redirect. The
+// create must not be re-sent and the flashed token must not be lost.
+func TestVersionMismatchAfterCreateKeepsTokenAndDoesNotResend(t *testing.T) {
+	f, s := login(t, func(f *fakePortal) { f.bumpOnCreate = true })
+	tok, err := s.CreateToken(context.Background(), "once")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Value != "pat-1" || tok.ID == "" {
+		t.Fatalf("token %+v", tok)
+	}
+	f.mu.Lock()
+	calls := f.createCalls
+	f.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("create sent %d times", calls)
+	}
+}
+
+func TestExpiredSessionIsUnauthorized(t *testing.T) {
+	f, s := login(t)
+	f.set(func(f *fakePortal) {
+		for _, sess := range f.sessions {
+			sess.authed = false
+		}
+	})
+	if _, err := s.ListTokens(context.Background()); !errors.Is(err, loqed.ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestUnexpectedPageIsInvalidPayload(t *testing.T) {
 	f, s := login(t)
-	f.mu.Lock()
-	f.brokenTokensPage = true
-	f.mu.Unlock()
+	f.set(func(f *fakePortal) { f.brokenTokensPage = true })
 	if _, err := s.ListTokens(context.Background()); !errors.Is(err, loqed.ErrInvalidPayload) {
 		t.Fatalf("got %v", err)
 	}
@@ -2633,7 +3152,7 @@ func TestLoginUnreachable(t *testing.T) {
 - [ ] **Step 3: Run to verify failure**
 
 Run: `go test ./cloud/portal/`
-Expected: FAIL — `undefined: portal.New`.
+Expected: FAIL — `no non-test Go files in …/cloud/portal`.
 
 - [ ] **Step 4: Implement**
 
@@ -2650,7 +3169,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -2678,7 +3196,7 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-func WithBaseURL(u string) Option              { return func(c *Client) { c.base = strings.TrimRight(u, "/") } }
+func WithBaseURL(u string) Option               { return func(c *Client) { c.base = strings.TrimRight(u, "/") } }
 func WithTransport(rt http.RoundTripper) Option { return func(c *Client) { c.transport = rt } }
 
 func New(opts ...Option) *Client {
@@ -2694,6 +3212,7 @@ type Session struct {
 	base    string
 	hc      *http.Client
 	version string
+	csrf    string // <meta name="csrf-token"> of the last HTML page
 }
 
 // Token is a newly created personal access token. Value is only available
@@ -2709,7 +3228,13 @@ type page struct {
 	Version   string          `json:"version"`
 }
 
-var dataPage = regexp.MustCompile(`data-page="([^"]*)"`)
+const loginComponent = "Auth/Login"
+
+var (
+	dataPage  = regexp.MustCompile(`data-page="([^"]*)"`)
+	csrfMeta  = regexp.MustCompile(`<meta\s+name="csrf-token"\s+content="([^"]*)"`)
+	errNoAuth = fmt.Errorf("%w: portal session is not logged in", loqed.ErrUnauthorized)
+)
 
 // Login starts a session. Bad credentials return loqed.ErrUnauthorized.
 func (c *Client) Login(ctx context.Context, email, password string) (*Session, error) {
@@ -2718,14 +3243,14 @@ func (c *Client) Login(ctx context.Context, email, password string) (*Session, e
 		return nil, err
 	}
 	s := &Session{base: c.base, hc: &http.Client{Jar: jar, Timeout: c.timeout, Transport: c.transport}}
-	if err := s.loadVersion(ctx, "/login"); err != nil {
+	if _, err := s.loadPage(ctx, "/login"); err != nil {
 		return nil, err
 	}
 	p, err := s.visit(ctx, http.MethodPost, "/login", map[string]any{"email": email, "password": password, "remember": true})
 	if err != nil {
 		return nil, err
 	}
-	if p.Component == "Auth/Login" || hasErrors(p.Props) {
+	if p.Component == loginComponent || hasErrors(p.Props) {
 		return nil, fmt.Errorf("%w: portal rejected the email or password", loqed.ErrUnauthorized)
 	}
 	return s, nil
@@ -2748,7 +3273,8 @@ func (s *Session) ListTokens(ctx context.Context) ([]TokenInfo, error) {
 	return out, nil
 }
 
-// CreateToken creates a personal access token and returns its value.
+// CreateToken creates a personal access token and returns its value. The
+// create request is sent exactly once, whatever happens afterwards.
 func (s *Session) CreateToken(ctx context.Context, name string) (Token, error) {
 	before, err := s.ListTokens(ctx)
 	if err != nil {
@@ -2781,8 +3307,14 @@ func (s *Session) CreateToken(ctx context.Context, name string) (Token, error) {
 
 // RevokeToken deletes a personal access token.
 func (s *Session) RevokeToken(ctx context.Context, id string) error {
-	_, err := s.visit(ctx, http.MethodDelete, "/personal-access-tokens/"+url.PathEscape(id), nil)
-	return err
+	p, err := s.visit(ctx, http.MethodDelete, "/personal-access-tokens/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	if p.Component == loginComponent {
+		return errNoAuth
+	}
+	return nil
 }
 
 // Logout ends the session.
@@ -2802,12 +3334,15 @@ type tokensProps struct {
 }
 
 func decodeTokens(p *page) (tokensProps, error) {
+	if p.Component == loginComponent {
+		return tokensProps{}, errNoAuth
+	}
 	if p.Component != "PersonalAccessTokens" {
 		return tokensProps{}, fmt.Errorf("%w: unexpected portal page %q", loqed.ErrInvalidPayload, p.Component)
 	}
 	var tp tokensProps
 	if err := json.Unmarshal(p.Props, &tp); err != nil {
-		return tokensProps{}, fmt.Errorf("%w: token list: %v", loqed.ErrInvalidPayload, err)
+		return tokensProps{}, fmt.Errorf("%w: token list: %w", loqed.ErrInvalidPayload, err)
 	}
 	return tp, nil
 }
@@ -2842,107 +3377,102 @@ func hasErrors(props json.RawMessage) bool {
 	return json.Unmarshal(p.Errors, &m) == nil && len(m) > 0
 }
 
-// loadVersion fetches an HTML page and reads the Inertia asset version.
-func (s *Session) loadVersion(ctx context.Context, target string) error {
+// loadPage fetches a page as HTML (a full browser visit) and returns its
+// Inertia page object. It refreshes the asset version and CSRF meta token.
+func (s *Session) loadPage(ctx context.Context, target string) (*page, error) {
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = s.base + target
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("%w: bad portal location", loqed.ErrInvalidPayload)
 	}
 	req.Header.Set("Accept", "text/html")
-	body, err := transport.Do(s.hc, req)
+	resp, body, err := transport.Send(s.hc, req)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if err := transport.CheckStatus(resp.StatusCode, nil); err != nil {
+		return nil, err // never keep portal HTML: it embeds the CSRF token
+	}
+	if m := csrfMeta.FindSubmatch(body); m != nil {
+		s.csrf = html.UnescapeString(string(m[1]))
 	}
 	m := dataPage.FindSubmatch(body)
 	if m == nil {
-		return fmt.Errorf("%w: portal page has no Inertia data", loqed.ErrInvalidPayload)
+		return nil, fmt.Errorf("%w: portal page has no Inertia data", loqed.ErrInvalidPayload)
 	}
 	var p page
 	if err := json.Unmarshal([]byte(html.UnescapeString(string(m[1]))), &p); err != nil {
-		return fmt.Errorf("%w: portal page data: %v", loqed.ErrInvalidPayload, err)
+		return nil, fmt.Errorf("%w: portal page data: %w", loqed.ErrInvalidPayload, err)
 	}
 	s.version = p.Version
-	return nil
+	return &p, nil
 }
 
-// visit performs an Inertia request and returns the resulting page,
-// following redirects. A 409 version conflict is retried once.
+// visit performs one Inertia request and returns the resulting page,
+// following redirects. It never re-sends a request: on a 409 version
+// conflict (which Inertia raises on the redirected GET after a mutation),
+// the X-Inertia-Location page is loaded as HTML instead, which carries the
+// same props, including one-time flash data such as a new token.
 func (s *Session) visit(ctx context.Context, method, path string, data any) (*page, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		var body io.Reader
-		if data != nil {
-			b, err := json.Marshal(data)
-			if err != nil {
-				return nil, err
-			}
-			body = bytes.NewReader(b)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, s.base+path, body)
+	var body io.Reader
+	if data != nil {
+		b, err := json.Marshal(data)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "text/html, application/xhtml+xml")
-		req.Header.Set("X-Requested-With", "XMLHttpRequest")
-		req.Header.Set("X-Inertia", "true")
-		req.Header.Set("X-Inertia-Version", s.version)
-		if data != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		if tok := s.xsrfToken(); tok != "" {
-			req.Header.Set("X-XSRF-TOKEN", tok)
-		}
-		resp, err := s.hc.Do(req)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil, err
-			}
-			var ue *url.Error
-			if errors.As(err, &ue) {
-				err = ue.Err
-			}
-			return nil, fmt.Errorf("%w: %v", loqed.ErrUnreachable, err)
-		}
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, transport.MaxBody))
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("%w: reading response: %v", loqed.ErrUnreachable, err)
-		}
-		switch resp.StatusCode {
-		case http.StatusConflict:
-			loc := resp.Header.Get("X-Inertia-Location")
-			if loc == "" {
-				loc = path
-			}
-			if err := s.loadVersion(ctx, loc); err != nil {
-				return nil, err
-			}
-			continue
-		case 419:
-			return nil, fmt.Errorf("%w: portal session or XSRF token expired", loqed.ErrUnauthorized)
-		}
-		if err := transport.CheckStatus(resp.StatusCode, raw); err != nil {
-			return nil, err
-		}
-		if resp.Header.Get("X-Inertia") != "true" {
-			return nil, fmt.Errorf("%w: portal returned a non-Inertia response", loqed.ErrInvalidPayload)
-		}
-		var p page
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, fmt.Errorf("%w: portal page: %v", loqed.ErrInvalidPayload, err)
-		}
-		if p.Version != "" {
-			s.version = p.Version
-		}
-		return &p, nil
+		body = bytes.NewReader(b)
 	}
-	return nil, fmt.Errorf("%w: portal asset version kept changing", loqed.ErrInvalidPayload)
+	req, err := http.NewRequestWithContext(ctx, method, s.base+path, body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: bad portal path", loqed.ErrInvalidPayload)
+	}
+	req.Header.Set("Accept", "text/html, application/xhtml+xml")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("X-Inertia", "true")
+	req.Header.Set("X-Inertia-Version", s.version)
+	if data != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if s.csrf != "" {
+		req.Header.Set("X-CSRF-TOKEN", s.csrf)
+	}
+	if tok := s.xsrfToken(); tok != "" {
+		req.Header.Set("X-XSRF-TOKEN", tok)
+	}
+	resp, raw, err := transport.Send(s.hc, req)
+	if err != nil {
+		return nil, err
+	}
+	switch resp.StatusCode {
+	case http.StatusConflict:
+		loc := resp.Header.Get("X-Inertia-Location")
+		if loc == "" {
+			return nil, fmt.Errorf("%w: version conflict without location", loqed.ErrInvalidPayload)
+		}
+		return s.loadPage(ctx, loc)
+	case 419:
+		return nil, fmt.Errorf("%w: portal rejected the CSRF token (HTTP 419)", loqed.ErrInvalidPayload)
+	}
+	if err := transport.CheckStatus(resp.StatusCode, nil); err != nil {
+		return nil, err
+	}
+	if resp.Header.Get("X-Inertia") != "true" {
+		return nil, fmt.Errorf("%w: portal returned a non-Inertia response", loqed.ErrInvalidPayload)
+	}
+	var p page
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("%w: portal page: %w", loqed.ErrInvalidPayload, err)
+	}
+	if p.Version != "" {
+		s.version = p.Version
+	}
+	return &p, nil
 }
 
-// xsrfToken returns the URL-decoded XSRF-TOKEN cookie (Laravel expects the
-// decoded value in X-XSRF-TOKEN).
+// xsrfToken returns the decoded XSRF-TOKEN cookie, if the portal sets one
+// (axios sends decodeURIComponent(cookie)).
 func (s *Session) xsrfToken() string {
 	u, err := url.Parse(s.base)
 	if err != nil {
@@ -2950,7 +3480,7 @@ func (s *Session) xsrfToken() string {
 	}
 	for _, c := range s.hc.Jar.Cookies(u) {
 		if c.Name == "XSRF-TOKEN" {
-			if v, err := url.QueryUnescape(c.Value); err == nil {
+			if v, err := url.PathUnescape(c.Value); err == nil {
 				return v
 			}
 			return c.Value
@@ -2963,14 +3493,21 @@ func (s *Session) xsrfToken() string {
 - [ ] **Step 5: Run tests**
 
 Run: `gofmt -w cloud && go test ./cloud/... -v -race`
-Expected: PASS (all portal tests plus cloud tests).
+Expected: PASS (10 portal tests plus 13 cloud tests).
 
-If `TestCreateListRevokeToken` fails with 419 after the POST redirect, check that the `X-XSRF-TOKEN` header is the decoded cookie value (`xsrf+/=s1`), not the raw cookie (`xsrf%2B%2F%3Ds1`).
+If `TestCreateListRevokeToken` fails with 419, check that `X-XSRF-TOKEN` is the decoded cookie value (`csrf+/=s1`, via `url.PathUnescape`), not the raw cookie (`csrf%2B%2F%3Ds1`), and that `X-CSRF-TOKEN` carries the meta value.
 
 - [ ] **Step 6: Full library check and commit**
 
-Run: `go vet ./... && go test -race ./...`
-Expected: PASS.
+Run:
+
+```bash
+gofmt -l . && go vet ./... && go test -race ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
+python3 testdata/gen_vectors.py   # must still print the values pasted in Task 3
+```
+
+Expected: `gofmt -l` prints nothing; all packages PASS; lint reports `0 issues.`
 
 ```bash
 git add cloud

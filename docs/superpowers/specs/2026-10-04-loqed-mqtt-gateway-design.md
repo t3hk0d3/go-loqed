@@ -1,7 +1,7 @@
 # go-loqed: LOQED library + loqed-mqtt gateway — Design
 
 Date: 2026-10-04
-Status: Draft, awaiting review
+Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2)
 
 ## 1. Purpose and context
 
@@ -74,14 +74,14 @@ Undocumented. Laravel + Inertia web app where users log in with email/password a
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/login` | sets `laravel_session` and `XSRF-TOKEN` cookies |
-| POST | `/login` | body `{email, password, remember}`, header `X-XSRF-TOKEN`; no captcha/2FA field in the form |
+| GET | `/login` | sets `laravel_session` (and possibly `XSRF-TOKEN`) cookies; HTML carries `<meta name="csrf-token">` |
+| POST | `/login` | body `{email, password, remember}`, header `X-CSRF-TOKEN` (meta value) and `X-XSRF-TOKEN` (cookie, if present); no captcha/2FA field in the form |
 | GET | `/personal-access-tokens` | Inertia page; props `tokens[]` (id, name, …) and, once after creation, `accessToken` (plaintext) |
 | POST | `/create-personal-access-tokens` | body `{name}`; redirects to the list page carrying `accessToken` |
 | DELETE | `/personal-access-tokens/{id}` | revoke token |
 | POST | `/logout` | end session |
 
-Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (from the page's `data-page.version`); a version mismatch returns 409 and must be retried with the new version. `/oauth/token` (Laravel Passport) also exists but needs a client id/secret we do not have; not used.
+Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (from the page's `data-page.version`). A version mismatch returns 409 with `X-Inertia-Location`; Inertia only version-checks GET, so on a mutation the 409 arrives on the redirected GET and the flash data (`accessToken`) is re-flashed onto that location. The client therefore never re-sends a mutation: it loads the `X-Inertia-Location` page as HTML and reads its props. Only plain GET visits are retried. 419 = CSRF rejected (reported as a portal-changed error, not as bad credentials). Any visit that ends on the `Auth/Login` page means the session is not authenticated (`ErrUnauthorized`). `/oauth/token` (Laravel Passport) also exists but needs a client id/secret we do not have; not used.
 
 ### 2.4 Verification items (must check against real hardware/account before v1)
 
@@ -91,7 +91,10 @@ Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (f
 - V4: Bridge HTTP port (assumed 80) for the TCP liveness probe.
 - V5: Unit of `wifi_strength`/`ble_strength` (status values look like %, docs call event values dB). Sensors publish raw values; unit/device_class chosen after verification.
 - V6: Whether cloud webhooks carry any signature header in practice. If they do, verify it in addition to the path secret.
-- V7: Portal login + token mint flow end to end: cookie/XSRF handling, whether `remember` is needed, exact `accessToken`/`tokens[]` prop shapes, behavior with accounts that have 2FA or SSO.
+- V7: Portal login + token mint flow end to end: cookie/XSRF vs meta CSRF handling, whether `remember` is needed, exact `accessToken`/`tokens[]` prop shapes, behavior with accounts that have 2FA or SSO.
+- V8: Home Assistant OS: the add-on (host network) resolves the `host` returned by `/services/mqtt` (`core-mosquitto`); the add-on options form renders `lock_settings`; `/data/options.json` validates with defaults only.
+
+These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged until each has a recorded outcome.
 
 ## 3. Architecture
 
@@ -132,7 +135,7 @@ type Credentials struct {
     LocalKeyID uint8
 }
 
-func New(host string, creds Credentials, opts ...Option) (*Client, error) // validates base64
+func New(host string, creds Credentials, opts ...Option) (*Client, error) // validates base64 and that host is an IP[:port]
 // Options: WithHTTPClient(*http.Client), WithClock(func() time.Time), WithScheme/WithPort (tests)
 
 func (c *Client) Status(ctx) (*Status, error)
@@ -145,7 +148,11 @@ func (c *Client) DeleteWebhook(ctx, id int) error
 func ParseEvent(bridgeKey []byte, body []byte, hash, timestamp string, now time.Time) (Event, error)
 ```
 
-`Event` is an interface implemented by `StateReachedEvent`, `GoToStateEvent`, `BatteryEvent`, `OnlineEvent`. Each carries `MacWifi`, `MacBLE`; state events carry raw `EventType`, target/requested `BoltState`, and `KeyLocalID *uint8` (nil if null/absent).
+`Event` is an interface implemented by `StateReachedEvent`, `GoToStateEvent`, `BatteryEvent`, `OnlineEvent`. Each carries `MacWifi`, `MacBLE`; state events carry raw `EventType` and `KeyLocalID *int` (nil if null, absent or outside 0..255; 255 means "unknown key" and is normalized to nil by the gateway).
+
+Classification is by `event_type` prefix: `GO_TO_STATE_*` → `GoToStateEvent` (target from `go_to_state`); everything else with an `event_type` → `StateReachedEvent`. The reached bolt state of a `StateReachedEvent` is derived from `event_type` exactly like loqedAPI (`STATE_CHANGED_OPEN[_REMOTE]` → open, `…_LATCH` → day_lock, `…_NIGHT_LOCK` → night_lock, anything else → unknown), never from `requested_state` (which is only what was asked for and is kept as a raw `RequestedState` field). `MOTOR_STALL` sets `Jammed: true` with bolt unknown. The same rules apply to cloud webhooks.
+
+Verification order is HASH first, then timestamp skew (`now.Unix() − ts`, integer seconds, |skew| ≤ 10), so unauthenticated requests never produce clock-skew diagnostics.
 
 Signing helpers (`signCommand`, `webhookHash`) are unexported but covered by golden-vector tests.
 
@@ -157,7 +164,7 @@ func (c *Client) ListLocks(ctx) ([]Lock, error)
 func (c *Client) Command(ctx, lockID string, s BoltState) error // open|day_lock|night_lock
 ```
 
-`Lock` includes all documented fields plus the undocumented local fields as optional (`*string`/`*uint8`), and a `HasLocalCredentials()` helper.
+`Lock` includes all documented fields plus the undocumented local fields as optional (`*string`/`*int`), and a `HasLocalCredentials()` helper (requires both keys and `local_id` in 0..255). `Command` treats a non-JSON 2xx response or a final URL on `/login` as `ErrUnauthorized`, so an injected redirect-following HTTP client can never turn an auth failure into silent success.
 
 ```go
 // Decodes an outgoing cloud webhook body (unsigned; caller authenticates the request).
@@ -177,11 +184,13 @@ func (s *Session) RevokeToken(ctx, id string) error
 func (s *Session) Logout(ctx) error
 ```
 
-Each `Session` owns a private cookie jar; nothing persists beyond it. Bad credentials → `ErrUnauthorized`; unexpected HTML/props shape → `ErrInvalidPayload` (signals the portal changed).
+Each `Session` owns a private cookie jar; nothing persists beyond it. Bad credentials or an expired session → `ErrUnauthorized`; unexpected HTML/props shape or CSRF rejection (419) → `ErrInvalidPayload` (signals the portal changed). Portal errors never carry response bodies (portal HTML embeds the CSRF token).
 
 ### 4.4 Errors (all packages)
 
-Sentinels usable with `errors.Is`: `ErrUnauthorized` (401/403 auth failures), `ErrRateLimited` (429, or cloud block response), `ErrUnreachable` (dial errors, timeouts, connection reset), `ErrBadSignature`, `ErrStaleTimestamp`, `ErrInvalidPayload`. Other HTTP failures return `*APIError{StatusCode, Body}` (body truncated, secrets never included). Gateway policy branches only on these types.
+Sentinels usable with `errors.Is`: `ErrUnauthorized` (401/403 auth failures), `ErrRateLimited` (429, or cloud block response), `ErrUnreachable` (the request was **provably not delivered**: DNS/dial/connect failure, including a connect timeout), `ErrNoResponse` (the request may have been delivered but no complete response arrived: timeout after the request was written, connection reset, truncated body), `ErrBadSignature`, `ErrStaleTimestamp`, `ErrInvalidPayload`. The two transport sentinels are distinguished with an `httptrace` `WroteRequest` hook. Other HTTP failures return `*APIError{StatusCode, Body}` (body truncated, secrets never included). Gateway policy branches only on these types.
+
+Errors never contain request URLs, query strings, headers or bodies (a bridge command URL contains a replayable signed command); this includes context cancellation and invalid-address errors. Inner errors are wrapped with `%w` so `context.Canceled`/`context.DeadlineExceeded` remain matchable.
 
 ## 5. Gateway (loqed-mqtt)
 
@@ -200,10 +209,9 @@ lock_settings:               # optional, keyed by lock id or name; all fields op
     bridge_key: ""           # manual local credentials (used when cloud lacks them)
     key_secret: ""
     local_id: 0
-    key_names:               # key_local_id -> display name for events
-      1: "Alice"
+    key_names: "1=Alice,3=Bob"  # key_local_id -> display name; also accepts a map {1: Alice} or a list ["1=Alice"]
 cache_path: /data/locks.json
-cache_max_age: 0             # 0 = never expire by age
+cache_max_age: 0             # 0 = never expire by age (checked at startup and hourly at runtime)
 reconcile_interval: 24h      # max interval between /status reconciles in local mode
 liveness_interval: 60s       # TCP probe interval in local mode
 cloud_budget: 10             # max /api/locks/ calls per rolling 12h (account-wide)
@@ -222,34 +230,39 @@ homeassistant:
   enabled: true
   discovery_prefix: homeassistant
 log_level: info
+log_format: text             # text | json
 ```
 
-Validation fails fast with a clear message (neither `cloud_token` nor `cloud_email`+`cloud_password` and no cached token, bad durations, `lock_settings` entries matching no lock are warnings, not errors).
+Validation fails fast with a clear message (neither `cloud_token` nor `cloud_email` and no cached token, bad durations, `webhook.public_url` with a path component). `cloud_email` without `cloud_password` is allowed (a cached minted token is used; minting is impossible and says so). `lock_settings` entries and allow-list names matching no lock are logged as warnings after lock data is loaded, not errors.
 
-Supervisor: if `SUPERVISOR_TOKEN` is set and `mqtt.url` is empty, `GET http://supervisor/services/mqtt` (Bearer `SUPERVISOR_TOKEN`) provides host/port/username/password/ssl.
+`/data/options.json` is decoded as JSON (not YAML), then applied with the same unknown-key checks as YAML; JSON map keys are strings, so numeric map keys (`key_names`) are parsed from strings in every source.
+
+Supervisor: if `SUPERVISOR_TOKEN` is set and `mqtt.url` is empty, `GET http://supervisor/services/mqtt` (Bearer `SUPERVISOR_TOKEN`) provides host/port/username/password/ssl. If the returned host does not resolve (host-network add-on, V8), `127.0.0.1` is used with the same port. The broker URL is only ever logged in redacted form (`url.URL.Redacted`).
 
 ### 5.2 Cloud authentication
 
 Token source, in order:
 1. `cloud_token` from config, if set.
 2. A previously minted token from the cache.
-3. Mint: `portal.Login(cloud_email, cloud_password)` → revoke existing tokens named `loqed-mqtt (<hostname>)` → `CreateToken("loqed-mqtt (<hostname>)")` → store value and id in the cache → `Logout`.
+3. Mint: `portal.Login(cloud_email, cloud_password)` → `CreateToken("loqed-mqtt <install-id>")` → store value, id and `sha256(lowercased cloud_email)` in the cache → revoke other tokens with the same name (create first, so a failed create never leaves the user without a token) → `Logout`. `<install-id>` is 8 random hex characters generated once and stored in the cache, so the name is stable across container recreation (a Docker hostname is the container id).
 
-When the Lock API returns `ErrUnauthorized` for a minted token, mint again (at most once per hour). When it does so for a configured `cloud_token`, log an error and keep running from the cache. Mint failures are logged with a clear hint to set `cloud_token` manually; they never crash a gateway that has a usable cache. The password is only needed for minting, so it can be removed from the config once a token is cached.
+A cached minted token is used only if its stored e-mail hash matches the configured `cloud_email` (changing accounts re-mints). When the Lock API returns `ErrUnauthorized` for a minted token, mint again, at most once per hour; the last mint time is persisted in the cache so restarts cannot bypass the limit. When it does so for a configured `cloud_token`, log an error and keep running from the cache. Mint failures are logged with a clear hint to set `cloud_token` manually; they never crash a gateway that has a usable cache. The password is only needed for minting, so it can be removed from the config once a token is cached.
 
 ### 5.3 Credential cache (`internal/store`)
 
-File: `cache_path`, JSON, written atomically (temp + fsync + rename), mode `0600`. Contents: `version`, `token_sha256` (identity of the token the lock data was fetched with), minted token `{id, value}` if any, `cloud_secret` (if generated), `fetched_at`, and per lock `id`, `name`, `model_name`, `bridge_ip`, `bridge_hostname` (informational only), `bridge_mac_wifi`, `local_id`, `key_secret`, `bridge_key`, `backend_key`.
+File: `cache_path`, JSON, written atomically (temp + fsync + rename), mode `0600`. Contents: `version`, `install_id`, `token_sha256` (identity of the token the lock data was fetched with), minted token `{id, value, email_sha256, minted_at}` if any, `cloud_secret` (if generated), `fetched_at`, `published_ids` (lock ids with retained MQTT/discovery topics), `budget` (`calls` timestamps in the rolling window and `blocked_until`), and per lock `id`, `name`, `model_name`, `bridge_ip`, `bridge_hostname` (informational only), `bridge_mac_wifi`, `local_id`, `key_secret`, `bridge_key`, `backend_key`. An unknown `version` is logged at warn and treated as missing. A cache write failure is reported as a storage error naming the path (never as "cloud unavailable"); the gateway keeps running from memory.
+
+Refreshes **merge** per lock: a lock present in the new list replaces its record, except that local-credential fields (`bridge_ip`, `local_id`, `key_secret`, `bridge_key`) absent from the new data keep their cached values. An empty lock list while the cache has locks is not applied (logged at warn, treated as a failed refresh); a non-empty list that lacks a cached lock removes it.
 
 Cloud refresh (`ListLocks` + save) is triggered when:
 1. Cache missing or unparseable.
 2. `token_sha256` ≠ hash of the token in use (configured or newly minted).
-3. An allow-listed lock is not in the cache.
+3. An allow-listed lock is not in the cache and the cache is older than 12 h (prevents a typo in `locks` from spending a call on every restart).
 4. Bridge returns `ErrUnauthorized` (keys rotated).
 5. Bridge unreachable at cached IP (see 5.5); if the refreshed IP differs, retry local with it.
-6. `cache_max_age > 0` and exceeded.
+6. `cache_max_age > 0` and exceeded (at startup and hourly while running).
 
-Refreshes consume the shared cloud budget (5.6) and are additionally limited to one per 5 minutes per lock-trigger. If the cloud is unreachable but a cache exists, start from cache. If neither exists, exit non-zero with a clear message.
+Refreshes consume the shared cloud budget (5.6). Per lock and trigger they back off exponentially: 5 min after the first, doubling up to 6 h while refreshes keep returning the same data for that lock; a refresh that changes the lock's IP or keys resets the backoff. Rule 4 is skipped for a lock whose `bridge_key` or `key_secret` is pinned in `lock_settings` (a refresh cannot fix a wrong manual key); rule 5 is skipped when `bridge_ip` is pinned. If the cloud is unreachable but a cache exists, start from cache. If neither exists, exit non-zero with a clear message.
 
 Connection target is always an IP (`lock_settings.bridge_ip` > cache). Hostnames/mDNS are never resolved.
 
@@ -261,8 +274,9 @@ Locks whose cloud data lacks local credentials and have no manual credentials in
 2. Load cache; resolve cloud token (5.2); refresh lock data per 5.3 rules 1–3, 6.
 3. Apply allow-list; build per-lock `bridge.Client` (when credentials exist).
 4. Start webhook listener, MQTT client, and one supervisor goroutine per lock.
-5. Publish discovery (if enabled), availability, and initial state.
+5. Publish discovery (if enabled), availability, and initial state. Remove retained topics (discovery, state, availability) for ids in `published_ids` that are no longer selected, then store the new `published_ids`. The same removal runs whenever a runtime refresh drops a lock.
 6. If `webhook.public_url` is set, log the full cloud webhook URL (`<public_url>/cloud/<cloud_secret>`) once at info level so the user can register it in the LOQED portal.
+7. A shutdown signal during startup is a clean exit (status 0).
 
 ### 5.5 Per-lock supervisor and failover (`internal/gateway`)
 
@@ -270,38 +284,49 @@ One goroutine per lock owns all its state; inputs (webhook events, MQTT commands
 
 Modes: `local`, `cloud`, `offline`.
 
-**Entering `local`:** `GET /status` (full snapshot), then ensure webhook registration:
+**Entering `local`:** requires a bridge client; if one cannot be built from the current record, the lock does not enter `local` (and leaves it if a credential refresh produced unusable data). `GET /status` (full snapshot), then ensure webhook registration:
 - List webhooks; if our exact URL (`<private_base>/webhook/<lock-id>`, see 7) is absent, create it with all triggers.
 - Delete webhooks whose URL path is `/webhook/<lock-id>` but host/port differ (stale gateway registrations). Never touch other webhooks.
+- If registration fails, `local` is still entered, but registration is retried every 10 min (and at every reconcile) until it succeeds; while unregistered, `/status` is polled every 10 min and cloud webhook events (if configured) drive state.
 
 **In `local`:**
 - State comes from webhooks.
-- Liveness: TCP connect to `bridge_ip:80` every `liveness_interval` (no HTTP request). Any received webhook also counts as liveness.
-- `GET /status` only: on entering `local`; after a command if no matching webhook arrives within 10 s; when `bolt_state` is `unknown` (at most once per 10 min); otherwise at most once per `reconcile_interval`.
-- Cloud webhook events (if configured) do not change state; they only enrich the matching bridge event (5.7).
-- 3 consecutive liveness/request failures (`ErrUnreachable`, 5 s timeout) → cache refresh rule 5. New IP → retry local. Same IP or refresh not possible → `cloud`.
+- Liveness: TCP connect to `bridge_ip:80` every `liveness_interval` (no HTTP request). Any received webhook also counts as liveness. TCP probe failures and HTTP failures are counted separately: a successful TCP probe resets only the probe counter, never the HTTP counter (a bridge that accepts TCP but hangs on HTTP must still fail over).
+- `GET /status` only: on entering `local`; `WebhookConfirm` (10 s) after a command or after any `GO_TO_STATE_*` event if no `STATE_CHANGED_*` event reaching the target arrives; after `MOTOR_STALL` (once, 10 s later); when `bolt_state` is `unknown` (at most once per 10 min); while webhook registration is pending (every 10 min); otherwise at most once per `reconcile_interval`. A failed `/status` marks state stale.
+- Cloud webhook events (if configured) do not change state while the bridge webhook is registered; they only enrich the matching bridge event (5.7).
+- 3 consecutive liveness failures, or 3 consecutive HTTP failures (`ErrUnreachable`/`ErrNoResponse`, 5 s timeout) → cache refresh rule 5. New IP → retry local. Same IP or refresh not possible → `cloud`.
 
 **In `cloud`:**
-- With cloud webhooks configured: state and events come from cloud webhooks (push). Polling drops to reconcile only.
+- State is stale from entering `cloud` until the first fresh cloud data (poll or webhook) arrives.
+- With cloud webhooks configured: state and events come from cloud webhooks (push). Polling drops to one reconcile per `reconcile_interval`, scheduled from the last successful poll (events never postpone it).
 - Without: state from `cloud.ListLocks()` within budget (5.6).
+- Freshness: `state_stale` becomes true when no fresh data (successful poll, accepted webhook) arrived within the expected interval plus 10 min (expected interval = background poll spacing without push, `reconcile_interval` with push).
 - Bridge liveness probe continues every `liveness_interval`; on first success → enter `local`.
-- 3 consecutive cloud failures (`ErrUnreachable`/5xx) → `offline`. `ErrRateLimited` does not go offline; it marks state stale and backs off (5.6).
+- Cloud reachability is decided by an unbudgeted TCP connect to the cloud host (port 443) every `liveness_interval`, not by API calls. 3 consecutive probe failures, or 3 consecutive failed API calls (`ErrUnreachable`/`ErrNoResponse`/5xx) → `offline`. `ErrRateLimited` does not go offline; it marks state stale and backs off (5.6).
+- Poll and status results are applied only if they were fetched after the last applied event; a poll result never overwrites newer webhook state. A cloud lock record with `online` absent keeps the previous online value.
 
-**In `offline`:** entities unavailable. Retry bridge probe and (budget permitting) cloud every 5 minutes, indefinitely. First success → corresponding mode.
+**In `offline`:** entities unavailable. Every 5 minutes, indefinitely: TCP-probe the bridge (success → `local`) and the cloud host (success → `cloud`). Neither probe spends cloud budget. A correctly signed bridge webhook received in `cloud` or `offline` is applied to state even if entering `local` then fails.
 
 **Commands (LOCK/UNLOCK/OPEN):**
-- Serialized per lock; a command older than 10 s when dequeued is dropped with a warning.
+- Serialized per lock. Each command has an absolute deadline of its MQTT arrival time + 10 s (`CommandMaxAge`); it is dropped with a warning if dequeued after that, and the deadline is the context of every actuation call, so no command is ever executed later than that. Retained messages on the command topic are ignored (and logged): a retained `OPEN` must never unlatch the door on reconnect.
+- Commands are never preceded by refreshes or polls; any refresh triggered by a command failure runs after the command has been resolved.
 - `local`: signed bridge command.
-  - `ErrUnreachable` → immediately retry via cloud (if lock has cloud access), count toward health.
-  - `ErrUnauthorized` → cache refresh (rule 4), retry local once, then cloud.
-- `cloud`: cloud command; publish transitional state (`locking`/`unlocking`/`opening`) immediately; one confirmation poll ~5 s later (budget permitting), skipped if a cloud webhook confirms first.
+  - `ErrUnreachable` (provably not delivered) → immediately send via cloud if the lock has cloud access and the deadline has not passed.
+  - `ErrNoResponse`, `*APIError`, or any other error (the bridge may have acted) → **never resend**; schedule an immediate `/status` (and, if that fails, a cloud confirmation poll) and report the failure.
+  - `ErrUnauthorized` (the bridge rejected the signature, so nothing happened) → send via cloud if possible, then cache refresh (rule 4).
+- `cloud` (or local fallback): cloud command; publish transitional state (`locking`/`unlocking`/`opening`) immediately; one confirmation poll ~5 s later (`PriorityConfirm`, bypasses the poll cache: only data fetched after the command counts) regardless of the current mode, skipped if a webhook confirms first. A cloud command that fails with `ErrNoResponse` or 5xx still schedules the confirmation poll (it may have run). No retry.
 - `offline`: rejected, logged.
+- Every failed or rejected command publishes a `command_failed` event (5.7) so HA automations can notify.
 
 **Availability:** per-lock `online` iff mode ≠ `offline` and lock is online (`lock_online=1` from status / cloud `online`, not overridden by an online-status event with `ble_strength=-1`).
 
 ### 5.6 Cloud request budget
 
-Account-wide token bucket shared by all locks and cache refreshes: at most `cloud_budget` (default 10) `GET /api/locks/` calls per rolling 12 h. One `ListLocks` call serves all locks. Spend priority: (1) cache refresh needed to reach `local`, (2) post-command confirmation, (3) background state polls, spaced evenly over the remaining window. Background polls are skipped while cloud webhooks are configured and at least one was received in the last `reconcile_interval`; then only one reconcile poll per `reconcile_interval` is made. When exhausted, state is published unchanged with `state_stale: true`. On `ErrRateLimited`, suspend all cloud reads for 12 h and log at error level. Cloud command calls are not budgeted (pending V2) but are logged with counts.
+Account-wide rolling window shared by all locks and cache refreshes: at most `cloud_budget` (default 10, max 12) `GET /api/locks/` calls per rolling 12 h. One `ListLocks` call serves all locks; results are shared for 30 s, except for confirmation polls, which only accept data fetched after the command. Spend priority and reserves: (1) post-command confirmation may use the whole budget; (2) cache refresh leaves 1 call; (3) background state polls leave 2 and are spaced `12h / cloud_budget` apart. Budget is taken only when a request is actually sent (not while no token is available). Background polls are skipped while cloud webhooks are configured and at least one was received in the last `reconcile_interval`; then only one reconcile poll per `reconcile_interval` is made. When exhausted, state is published unchanged with `state_stale: true`. On `ErrRateLimited`, suspend all cloud reads for 12 h and log at error level.
+
+The window (call timestamps) and the 12 h block are persisted in the cache after every change and restored at startup (timestamps in the future are clamped to now), so crash loops and restarts cannot exceed the account limit. Cloud command calls are not refused (a door command must not be blocked by polling) but are recorded in the same window (pending V2), so reads back off after commands; each recorded command logs the window count at info.
+
+Worst case per rolling 12 h with defaults: 10 reads + recorded commands (reads stop when commands fill the window). A flapping bridge triggers refreshes at +5 min, +10, +20, +40, +80, +160, +320 (7 in the first 12 h per lock), and refreshes stop at the 1-call reserve.
 
 ### 5.7 State and event mapping
 
@@ -318,14 +343,14 @@ Bolt state → HA lock state:
 | `MOTOR_STALL` | `JAMMED` |
 | `unknown` / `STATE_CHANGED_UNKNOWN` | unknown (`lock: null`; matches HA core since 2026-10-01) |
 
-Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`, `unlocking`, `opening`, `jammed`, `unknown`. Unrecognized raw event types map to `unknown` (never dropped).
+Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`, `unlocking`, `opening`, `jammed`, `unknown`, `command_failed`. Unrecognized raw event types map to `unknown` (never dropped). `command_failed` carries `reason` = the command (`LOCK`/`UNLOCK`/`OPEN`) and `source` = `gateway`, plus an `error` attribute with the error class (`expired`, `offline`, `unreachable`, `no_response`, `unauthorized`, `rate_limited`, `failed`).
 
 Event attributes: `reason` (raw `event_type`), `source` (parsed from raw type: `touch`, `remote`, `ble`, `twist_assist`, `instant_open`, `manual`, `other`), `key_local_id` (null if absent or 255), `key_name`.
 
 `key_name` priority: `lock_settings.<lock>.key_names[key_local_id]` → cloud webhook `key_name_user` → null. Account e-mail and account/admin names are never decoded, published or logged.
 
 Event sources by mode:
-- `local`: bridge webhooks only. A cloud webhook with the same `lock_id` and `event_type` within 30 s of a bridge event enriches it with `key_name` (republishes the state document; does not emit a second event). Unmatched cloud events in `local` mode are dropped.
+- `local`: bridge webhooks only (while the bridge webhook is registered). A cloud webhook with the same `lock_id`, `event_type` and `key_local_id` within 30 s of a bridge event enriches it with `key_name` (republishes the state document; does not emit a second event). Unmatched cloud events in `local` mode are dropped.
 - `cloud`: cloud webhooks, if configured.
 - Never from polling: no synthetic events from `/status` or `ListLocks` results. Event delivery is best-effort (webhooks can be lost); documentation states that automations about *whether* the door is locked must use the lock entity.
 
@@ -333,7 +358,7 @@ Battery and online-status webhook events update the state document but do not pr
 
 ## 6. MQTT and Home Assistant (`internal/hass`)
 
-Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT. On reconnect: resubscribe, republish discovery (if enabled), availability and current state.
+Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT. On reconnect: resubscribe, republish discovery (if enabled), availability and current state. The reconnect republish always reads the latest cached document at publish time, so it can never overwrite a newer state with an older one. Messages on the command topic with the retain flag set are ignored.
 
 ### 6.1 Topics (`<base>` = `mqtt.base_topic`, `<id>` = cloud lock id)
 
@@ -342,7 +367,7 @@ Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT
 | `<base>/status` | yes | `online`/`offline` (LWT `offline`) |
 | `<base>/<id>/availability` | yes | `online`/`offline` |
 | `<base>/<id>/state` | yes | JSON state document (`lock` is `null` when unknown) |
-| `<base>/<id>/event` | **no** | JSON `{event_type, reason, source, key_local_id, key_name}` |
+| `<base>/<id>/event` | **no** | JSON `{event_type, reason, source, key_local_id, key_name}` (+ `error` for `command_failed`) |
 | `<base>/<id>/command` | no (subscribe, QoS 1) | `LOCK`/`UNLOCK`/`OPEN` |
 
 State document:
@@ -360,7 +385,7 @@ These topics are published regardless of `homeassistant.enabled`, so the gateway
 When `homeassistant.enabled`:
 - One retained device-based discovery message per lock at `<discovery_prefix>/device/loqed_<id>/config`. All entities of a lock are components of that single device, so they are grouped per lock in HA. Device: name = lock name, manufacturer `LOQED`, model = `model_name`, identifiers = `loqed_<id>`, connections = bridge Wi-Fi MAC when known.
 - Published at startup, on MQTT reconnect, and when `<discovery_prefix>/status` receives `online`.
-- Locks no longer present (removed from account or allow-list) get an empty retained payload on their discovery topic, removing the device.
+- Locks no longer present (removed from account or allow-list, at startup or after a runtime refresh) get an empty retained payload on their discovery, state and availability topics, removing the device. Tracking uses `published_ids` in the cache.
 - `availability_mode: all` over `<base>/status` and `<base>/<id>/availability`.
 
 Components per lock:
@@ -381,39 +406,40 @@ Components per lock:
 
 One HTTP listener (`webhook.listen`) serves:
 
-- `POST /webhook/<lock-id>` (bridge, private): look up lock (unknown → 404); missing `TIMESTAMP`/`HASH` → 400; verify via `bridge.ParseEvent` (bad hash → 401, stale timestamp → 401 and log observed clock skew); forward to supervisor; 200.
+- `POST /webhook/<lock-id>` (bridge, private): look up lock (unknown → 404); missing `TIMESTAMP`/`HASH` → 400; verify via `bridge.ParseEvent` (bad hash → 401, stale timestamp → 401 and log observed clock skew; only reachable with a valid hash); forward to supervisor (queue full → 503); 200.
 - `POST /cloud/<cloud_secret>` (cloud, public): only routed when `public_url` is set; wrong secret → 404 (constant-time compare); decode via `cloud.ParseWebhook`; route by `lock_id` (unknown → 404); forward to supervisor; 200. The path secret is the only authentication (see V6); it is 32 random bytes, base64url, and never logged except in the one startup line.
-- `GET /healthz`: 200 with JSON per-lock `{mode, available, last_event_at}`; 503 if MQTT disconnected.
-- Body size limit 64 KiB on both webhook routes.
+- `GET /healthz`: 200 with JSON per-lock `{mode, available, last_event_at}` and `mqtt_connected`; 503 only if MQTT has been disconnected for more than 5 minutes (so a broker restart does not make the add-on watchdog restart the gateway).
+- Body size limit 64 KiB on both webhook routes. Server timeouts: read header 5 s, read 15 s, write 15 s, idle 60 s. If the listener fails at runtime, `Run` returns the error (the process exits non-zero and is restarted) instead of silently running without webhooks.
 
 URLs:
 - Private (bridge) base: `webhook.private_url` if set; otherwise per lock `http://<local-ip>:<port>`, where `<local-ip>` is the source address the OS selects for reaching that lock's bridge IP (UDP connect, no packets sent).
-- Public (cloud) base: `webhook.public_url`. Documentation tells users to expose only the `/cloud/` path through their reverse proxy.
+- Public (cloud) base: `webhook.public_url` (scheme + host[:port] only; a path is a config error). Documentation tells users to expose only the `/cloud/` path through their reverse proxy, forwarded unchanged, and not to log request paths (the path is the secret).
+- When the auto-detected private address is in a Docker bridge network (`172.16.0.0/12`) and the bridge IP is not, a warning tells the user to use host networking or set `webhook.private_url`.
 
 Requires accurate host time (NTP) for bridge webhooks; documented.
 
 ## 8. Error handling and logging
 
-- `log/slog`, text or JSON, level from config. Never log tokens, passwords, keys, the cloud webhook secret (except the single startup line), signed commands, full cloud responses, or cloud webhook bodies (they contain personal data).
+- `log/slog`, text or JSON (`log_format`), level from config. Never log tokens, passwords, keys, the cloud webhook secret (except the single startup line), signed commands, URLs with credentials, full cloud responses, or cloud webhook bodies (they contain personal data).
 - MQTT disconnects do not change lock modes; state continues to be tracked and is republished on reconnect.
-- Mode transitions logged at info; repeated identical failures rate-limited in logs.
+- Mode transitions logged at info. Repeated identical warnings (same message and lock) are rate-limited: the first is logged, repeats within 10 min are counted and summarized in the next emitted line (`repeated=N`).
 - Fatal at startup only for: invalid config, or no cache and no cloud access. Everything at runtime degrades, never exits.
 
 ## 9. Packaging
 
-- **Dockerfile:** multi-stage; `CGO_ENABLED=0` static binary on `gcr.io/distroless/static:nonroot`; `HEALTHCHECK` is not available in distroless without a shell, so the binary supports `loqed-mqtt healthcheck` (calls `/healthz`).
-- **Images:** `linux/amd64`, `linux/arm64`, `linux/arm/v7`, pushed to `ghcr.io/t3hk0d3/loqed-mqtt` by GitHub Actions on tags.
-- **docker-compose.yml:** `network_mode: host` (so auto-detected webhook URL is the real LAN IP), volume for `/data`, env-based config.
-- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt`, `host_network: true`, `services: [mqtt:need]`, `map`/persistent `/data`, options schema mirroring 5.1 (`cloud_token` and `cloud_password` as `password` type), `watchdog` on `/healthz`. `DOCS.md` covers token vs email/password setup, NTP requirement, best-effort events, the cloud rate limit, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering the logged URL at app.loqed.com).
+- **Dockerfile:** multi-stage; `CGO_ENABLED=0` static binary. Two final targets: `standalone` on `gcr.io/distroless/static-debian12:nonroot` with a `/data` directory owned by uid 65532 (so named volumes are writable), and `addon` on `gcr.io/distroless/static-debian12` (root; the Supervisor's `/data` is root-owned). Exec-form `HEALTHCHECK` runs `loqed-mqtt healthcheck`, which calls `/healthz` on the configured listen address (an unspecified host maps to 127.0.0.1). `LABEL org.opencontainers.image.source` links the package to the repo.
+- **Images:** standalone `ghcr.io/t3hk0d3/loqed-mqtt` for `linux/amd64`, `linux/arm64`, `linux/arm/v7`; add-on `ghcr.io/t3hk0d3/loqed-mqtt-addon` for `linux/amd64`, `linux/arm64`. Pushed by GitHub Actions on `v*` tags after tests pass; `latest` only for non-prerelease tags. Packages must be made public once after the first push (documented release step).
+- **docker-compose.yml:** `network_mode: host` (so auto-detected webhook URL is the real LAN IP), named volume for `/data`, env-based config.
+- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt-addon` (prebuilt; no `build.yaml`, no local build: current Supervisor no longer passes `BUILD_FROM`), `arch: [amd64, aarch64]`, `host_network: true` (so no `ports`), `services: [mqtt:need]`, persistent `/data`, options schema mirroring 5.1 with nesting depth ≤ 2 (`lock_settings` is a list of objects whose `key_names` is a `"1=Alice,3=Bob"` string; every nested key has a default; `webhook.listen` is not exposed), `cloud_token` and `cloud_password` as `password?`, `watchdog` on `/healthz`. Release order: push the tag (images) first, then bump `addon/config.yaml` `version`. `DOCS.md` covers token vs email/password setup, the `lock_settings`/`key_names` format, NTP requirement, best-effort events, the cloud rate limit, `private_url` when not on host networking, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering the logged URL at app.loqed.com).
 
 ## 10. Testing
 
 - **bridge/cloud:** table tests against `httptest` servers using fixture payloads for status, webhook list, and every bridge and cloud event family (including `MOTOR_STALL`, `*_REMOTE`, null `key_local_id`, string-typed numbers). Cloud webhook parsing must not expose e-mail/account fields. Error mapping tests for 401/403/429/5xx/timeouts.
 - **cloud/portal:** fake Laravel/Inertia server: XSRF cookie handling, login success/failure, Inertia version 409 retry, token create/list/revoke, changed-props → `ErrInvalidPayload`.
 - **Golden vectors:** signed command bytes and all webhook hashes generated once from `loqedAPI` 2.1.16 with fixed clock and keys; Go output must match byte-for-byte. Generator script committed under `testdata/`.
-- **gateway:** state-machine tests with fake bridge/cloud interfaces and an injectable clock: local→cloud→offline→local, IP-change refresh, auth-error refresh, command fallback to cloud, stale-command drop, missed-webhook `/status` fallback, unknown-state recovery limit, budget exhaustion, 429 backoff, cloud-only locks, token minting and re-mint on 401, cloud-webhook push in `cloud` mode, cloud→bridge event enrichment and 30 s matching window in `local` mode.
+- **gateway:** state-machine tests with fake bridge/cloud interfaces and an injectable clock: local→cloud→offline→local, IP-change refresh, auth-error refresh, command fallback to cloud **only** on `ErrUnreachable` (never on `ErrNoResponse`), command deadline, stale-command drop, missed-webhook `/status` fallback, lost `STATE_CHANGED` after `GO_TO_STATE`, TCP-up/HTTP-hung bridge fails over, nil bridge client never used, unknown-state recovery limit, budget exhaustion, budget persistence across restart, refresh backoff under a flapping bridge, confirmation poll ignores pre-command cached data, 429 backoff, cloud-only locks, cloud probe-based offline detection and 5 min recovery, token minting and re-mint on 401, cloud-webhook push in `cloud` mode, cloud→bridge event enrichment and 30 s matching window in `local` mode. At least one test runs the supervisor against the real `CloudHub` + `Budget` (only the HTTP API faked).
 - **store:** atomic write, `0600`, token-hash mismatch, corrupt file handling, minted token and generated secret persistence.
-- **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery.
+- **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored.
 - **Integration:** run the gateway against an in-process MQTT broker (`mochi-mqtt/server`) and fake bridge/cloud servers: discovery published → command in → signed bridge call out → webhook in → state and event published.
-- **CI:** `go test -race ./...`, `golangci-lint`, image build.
+- **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.
 - **Manual:** verification items V1–V7 against a real lock and account before v1 release.
