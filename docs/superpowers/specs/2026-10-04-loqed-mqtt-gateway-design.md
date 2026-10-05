@@ -6,7 +6,7 @@ Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revi
 **Rev 2.1 (2026-10-05)** — all changes come from tests against a real LOQED Touch, bridge and account (2.5):
 - Command pipeline redesigned (5.8): latest command wins, retries only when a request provably never left, 30 s / 10 s deadlines, local-then-cloud, confirmation from webhooks, retained `command_status` topic.
 - `WebhookConfirm` 10 s → 30 s; bridge `/status` demoted to a hint that never overrides newer webhook state (5.5).
-- "No key" is `255` (bridge) or `""`/`null` (cloud) and means a manual action (4.1, 4.2, 5.7).
+- `key_local_id` 255, `""`, `null` or absent means "no key" (a manual action by hand or a system action such as the automatic latch after an open); events without a key get source `unknown` (4.1, 4.2, 5.7).
 - Cloud webhooks carry the numeric internal lock id, not the API id → one cloud webhook URL per lock (5.4, 7); duplicate deliveries are dropped; cloud events may arrive before bridge events (5.7).
 - Token lifetime and lock-key lifecycle: tokens expire (~182 days); revoking or expiring a token does not revoke its lock key; deleting the key in the app does (5.2).
 - Portal login sends `remember: false` (4.3).
@@ -62,7 +62,7 @@ Sources: LOQED support docs (updated June 2026), `loqedAPI` 2.1.16 (pinned by HA
   - Battery: `{mac_wifi, mac_ble, battery_type, battery_percentage}`.
   - Online status: `{mac_wifi, mac_ble, wifi_strength, ble_strength}`; `ble_strength = -1` means lock offline.
   Numeric fields may arrive as JSON strings or numbers; parsers must accept both.
-- Observed behavior (2.5): a remote command produces `GO_TO_STATE_MANUAL_LOCK_REMOTE_{LATCH,NIGHT_LOCK}` (or `GO_TO_STATE_INSTANTOPEN_OPEN`) 0.4–6 s after `/to_lock`, then `STATE_CHANGED_*` 4–16 s after it. `REMOTE` means "a key acted remotely" (bridge, cloud or the app over BLE); only `key_local_id` identifies who. A command for the state the lock is already in produces `GO_TO_STATE_*` and no `STATE_CHANGED_*`. After `STATE_CHANGED_OPEN` the lock returns to `STATE_CHANGED_LATCH` (key 255) by itself within ~3 s. Manual actions report `key_local_id` 255. `MOTOR_STALL` is followed by `STATE_CHANGED_UNKNOWN` (key 255).
+- Observed behavior (2.5): a remote command produces `GO_TO_STATE_MANUAL_LOCK_REMOTE_{LATCH,NIGHT_LOCK}` (or `GO_TO_STATE_INSTANTOPEN_OPEN`) 0.4–6 s after `/to_lock`, then `STATE_CHANGED_*` 4–16 s after it. `REMOTE` means "a key acted remotely" (bridge, cloud or the app over BLE); only `key_local_id` identifies who. A command for the state the lock is already in produces `GO_TO_STATE_*` and no `STATE_CHANGED_*`. After `STATE_CHANGED_OPEN` the lock returns to `STATE_CHANGED_LATCH` (key 255) by itself within ~3 s. Actions without a key (turning the knob by hand, the automatic latch, `STATE_CHANGED_UNKNOWN` after `MOTOR_STALL`) carry `key_local_id` 255 on the bridge and `""` in the cloud; they cannot be told apart reliably.
 - The bridge delivers webhooks to its targets sequentially and updates `/status` afterwards: with 2 reachable targets `STATE_CHANGED_*` arrived at +4 s and `/status` caught up within 1–3 s; with 5 targets (some unreachable) `STATE_CHANGED_*` took 10–16 s and `/status` stayed stale for minutes. Webhooks are outbound connections from the bridge, so segmented networks need a firewall rule bridge → gateway `webhook.listen` port.
 
 ### 2.2 Cloud Lock API (`https://integrations.production.loqed.com/api`)
@@ -79,7 +79,7 @@ Public, documented API. This is what the rest of this spec calls "cloud".
   - State reached: `{event_type, requested_state, lock_id, key_local_id, key_name_user, key_name_admin, key_account_email, key_account_name, value1, value2, value3}`.
   - Going to state: `{event_type, go_to_state, lock_id, key_local_id, key_name_user, …same personal fields…}`.
   - Signal: `{ble_strength, wifi_strength, lock_id}`; battery: `{battery_percentage, lock_id}`; online: `{online: 0|1, lock_id}`.
-  - `lock_id` is the **numeric internal id** (e.g. `6148`), not the `/api/locks/` id; the API does not expose it. `key_local_id` is a string (`"1"`), and `""` for manual actions. `value1..value3` are IFTTT-style fields (`value2` = key name, `value3` = **account e-mail in plain text**); like the other personal fields they are never decoded or logged.
+  - `lock_id` is the **numeric internal id** (e.g. `6148`), not the `/api/locks/` id; the API does not expose it. `key_local_id` is a string (`"1"`), `""` when no key was involved. `value1..value3` are IFTTT-style fields (`value2` = key name, `value3` = **account e-mail in plain text**); like the other personal fields they are never decoded or logged.
   - Each event may be delivered twice ~4 s apart, and cloud copies usually arrive 0.1–0.8 s **before** the bridge webhook for the same event.
 
 ### 2.3 Integrations portal / Management API (`https://integrations.production.loqed.com`)
@@ -108,7 +108,7 @@ Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (f
 - V7: Portal login + token mint flow end to end: cookie/XSRF vs meta CSRF handling, whether `remember` is needed, exact `accessToken`/`tokens[]` prop shapes, behavior with accounts that have 2FA or SSO.
 - V8: Home Assistant OS: the add-on (host network) resolves the `host` returned by `/services/mqtt` (`core-mosquitto`); the add-on options form renders `lock_settings`; `/data/options.json` validates with defaults only.
 
-- V9 (new): whether deleted key slots stay deleted across token re-mints, and the exact stale-timestamp tolerance of the lock.
+- V9 (new): whether deleted key slots stay deleted across token re-mints; the exact stale-timestamp tolerance of the lock.
 
 These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged until each has a recorded outcome.
 
@@ -179,7 +179,7 @@ func (c *Client) DeleteWebhook(ctx, id int) error
 func ParseEvent(bridgeKey []byte, body []byte, hash, timestamp string, now time.Time) (Event, error)
 ```
 
-`Event` is an interface implemented by `StateReachedEvent`, `GoToStateEvent`, `BatteryEvent`, `OnlineEvent`. Each carries `MacWifi`, `MacBLE`; state events carry raw `EventType` and `KeyLocalID *int` (nil if null, absent, empty, outside 0..254, or 255; 255 is the bridge's "no key" marker for manual actions).
+`Event` is an interface implemented by `StateReachedEvent`, `GoToStateEvent`, `BatteryEvent`, `OnlineEvent`. Each carries `MacWifi`, `MacBLE`; state events carry raw `EventType` and `KeyLocalID *int` (a real key 0..254; nil for 255, `null`, `""`, absent or out of range = no key).
 
 Classification is by `event_type` prefix: `GO_TO_STATE_*` → `GoToStateEvent` (target from `go_to_state`); everything else with an `event_type` → `StateReachedEvent`. The reached bolt state of a `StateReachedEvent` is derived from `event_type` exactly like loqedAPI (`STATE_CHANGED_OPEN[_REMOTE]` → open, `…_LATCH` → day_lock, `…_NIGHT_LOCK` → night_lock, anything else → unknown), never from `requested_state` (which is only what was asked for and is kept as a raw `RequestedState` field). `MOTOR_STALL` sets `Jammed: true` with bolt unknown. The same rules apply to cloud webhooks.
 
@@ -202,7 +202,7 @@ func (c *Client) Command(ctx, lockID string, s BoltState) error // open|day_lock
 func ParseWebhook(body []byte) (WebhookEvent, error)
 ```
 
-`WebhookEvent` carries `LockID` (the numeric internal id as a string), `EventType`, target/requested `BoltState`, `KeyLocalID *int` (nil for `""`, `null`, absent or 255 = manual action), `KeyNameUser`, and signal/battery/online fields when present. `key_name_admin`, `key_account_email` (and the legacy spelling `key_account_e-mail`), `key_account_name` and `value1..value3` are deliberately **not** decoded, so they cannot leak downstream.
+`WebhookEvent` carries `LockID` (the numeric internal id as a string), `EventType`, target/requested `BoltState`, `KeyLocalID *int` with the same rules as 4.1 (255, `""`, `null` or absent → nil), `KeyNameUser`, and signal/battery/online fields when present. `key_name_admin`, `key_account_email` (and the legacy spelling `key_account_e-mail`), `key_account_name` and `value1..value3` are deliberately **not** decoded, so they cannot leak downstream.
 
 ### 4.3 `cloud/portal`
 
@@ -375,7 +375,7 @@ Bolt state → HA lock state:
 
 Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`, `unlocking`, `opening`, `jammed`, `unknown`, `command_failed`. Unrecognized raw event types map to `unknown` (never dropped). `command_failed` carries `reason` = the command (`LOCK`/`UNLOCK`/`OPEN`) and `source` = `gateway`, plus an `error` attribute with the error class (`expired`, `offline`, `unreachable`, `no_response`, `unauthorized`, `rate_limited`, `failed`).
 
-Event attributes: `reason` (raw `event_type`), `source`, `key_local_id` (null for no key), `key_name`. `source` is decided in this order: no key (255, `""`, `null`) → `manual`; the key is the gateway's own `local_id` and a gateway command is in flight or was sent in the last 60 s → `gateway`; otherwise parsed from the raw type (`touch`, `twist_assist`, `instant_open`, `remote` for `*_REMOTE_*`, `other`). `remote` means "another key acting remotely" (the app over BLE, another integration, the cloud), not necessarily the bridge.
+Event attributes: `reason` (raw `event_type`), `source`, `key_local_id` (null for no key), `key_name`. `source` is decided in this order: no key → `unknown`; the key is the gateway's own `local_id` and a gateway command is in flight or was sent in the last 60 s → `gateway`; otherwise parsed from the raw type (`touch`, `twist_assist`, `instant_open`, `remote` for `*_REMOTE_*`, `other`). The `manual` source value is dropped: it cannot be distinguished from system actions. `remote` means "another key acting remotely" (the app over BLE, another integration, the cloud), not necessarily the bridge.
 
 The automatic return to day_lock after an open (a `STATE_CHANGED_LATCH` with no key within 5 s of `STATE_CHANGED_OPEN`) updates state to `UNLOCKED` but publishes no separate `unlocked` event.
 
@@ -562,6 +562,6 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored.
 - **Integration:** run the gateway against an in-process MQTT broker (`mochi-mqtt/server`) and fake bridge/cloud servers: discovery published → command in → signed bridge call out → webhook in → state and event published.
 - **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.
-- **Mock bridge realism:** the fake bridge and smoke-test mock accept every `/to_lock` with `200 "Message resent to the lock"` and act only on valid signatures with fresh timestamps; emit `GO_TO_STATE_*` after ~3 s and `STATE_CHANGED_*` after 10–16 s (configurable); lag `/status` behind webhooks, with a mode that keeps it stale; emit key 255 for manual actions and the automatic latch after open; the fake cloud returns 204 for commands, the `ApiKey` 404 for deleted keys, and sends cloud webhook copies before bridge copies, sometimes twice.
+- **Mock bridge realism:** the fake bridge and smoke-test mock accept every `/to_lock` with `200 "Message resent to the lock"` and act only on valid signatures with fresh timestamps; emit `GO_TO_STATE_*` after ~3 s and `STATE_CHANGED_*` after 10–16 s (configurable); lag `/status` behind webhooks, with a mode that keeps it stale; emit key 255 for actions without a key, including the automatic latch after open (the fake cloud sends `""`); the fake cloud returns 204 for commands, the `ApiKey` 404 for deleted keys, and sends cloud webhook copies before bridge copies, sometimes twice.
 - **Command pipeline:** one test per effect in the 5.8 skeleton.
 - **Manual:** verification items V2, V8, V9 against a real lock and account before v1 release (V1, V3–V7 recorded in 2.5).
