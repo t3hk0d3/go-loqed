@@ -25,13 +25,13 @@ const MQTTGrace = 5 * time.Minute
 type Sink interface {
 	BridgeKey(lockID string) ([]byte, bool)
 	DeliverBridgeEvent(lockID string, ev bridge.Event) error
-	DeliverCloudEvent(ev cloud.WebhookEvent) error
+	DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error
 	Health() map[string]gateway.Health
 }
 
 type Options struct {
 	Sink        Sink
-	CloudSecret string               // empty disables POST /cloud/{secret}
+	CloudSecret string               // empty disables POST /cloud/{secret}/{id}
 	MQTTDownFor func() time.Duration // 0 while connected
 	Now         func() time.Time
 	Log         *slog.Logger
@@ -47,7 +47,7 @@ func NewHandler(o Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/{id}", o.bridgeWebhook)
 	if o.CloudSecret != "" {
-		mux.HandleFunc("POST /cloud/{secret}", o.cloudWebhook)
+		mux.HandleFunc("POST /cloud/{secret}/{id}", o.cloudWebhook)
 	}
 	mux.HandleFunc("GET /healthz", o.healthz)
 	return mux
@@ -103,7 +103,15 @@ func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	o.deliverResult(w, r, o.Sink.DeliverCloudEvent(ev))
+	id := r.PathValue("id")
+	err = o.Sink.DeliverCloudEvent(id, ev)
+	if errors.Is(err, gateway.ErrCloudIDMismatch) {
+		o.Log.Warn("rejected a cloud webhook registered on another lock's URL; register each lock's own URL",
+			"lock_id", id, "cloud_lock_id", ev.LockID)
+		http.Error(w, "this URL belongs to another lock", http.StatusConflict)
+		return
+	}
+	o.deliverResult(w, r, err)
 }
 
 func (o Options) deliverResult(w http.ResponseWriter, r *http.Request, err error) {

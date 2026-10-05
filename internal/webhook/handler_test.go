@@ -1,6 +1,7 @@
 package webhook_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -28,6 +29,8 @@ var now = time.Unix(1700000000, 0)
 type fakeSink struct {
 	bridgeEvents []bridge.Event
 	cloudEvents  []cloud.WebhookEvent
+	cloudLocks   []string
+	boundID      string // numeric cloud id bound to lock1
 	busy         bool
 }
 
@@ -46,11 +49,17 @@ func (f *fakeSink) DeliverBridgeEvent(_ string, ev bridge.Event) error {
 	return nil
 }
 
-func (f *fakeSink) DeliverCloudEvent(ev cloud.WebhookEvent) error {
-	if ev.LockID != "lock1" {
+func (f *fakeSink) DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error {
+	if lockID != "lock1" {
 		return gateway.ErrUnknownLock
 	}
+	if f.boundID == "" {
+		f.boundID = ev.LockID
+	} else if f.boundID != ev.LockID {
+		return gateway.ErrCloudIDMismatch
+	}
 	f.cloudEvents = append(f.cloudEvents, ev)
+	f.cloudLocks = append(f.cloudLocks, lockID)
 	return nil
 }
 
@@ -137,21 +146,45 @@ func TestBridgeWebhookBodyLimit(t *testing.T) {
 func TestCloudWebhook(t *testing.T) {
 	sink := &fakeSink{}
 	h := handler(sink, 0, secret)
-	body := `{"requested_state":"DAY_LOCK","event_type":"STATE_CHANGED_LATCH","lock_id":"lock1","key_name_user":"Front door"}`
-	if code := post(h, "/cloud/"+secret, body, nil); code != 200 || len(sink.cloudEvents) != 1 {
+	body := `{"requested_state":"DAY_LOCK","event_type":"STATE_CHANGED_LATCH","lock_id":6148,"key_name_user":"Front door"}`
+	if code := post(h, "/cloud/"+secret+"/lock1", body, nil); code != 200 || len(sink.cloudEvents) != 1 || sink.cloudLocks[0] != "lock1" {
 		t.Fatalf("code %d events %d", code, len(sink.cloudEvents))
 	}
-	if code := post(h, "/cloud/wrong-secret-0000000000000000", body, nil); code != 404 {
+	if code := post(h, "/cloud/"+secret+"/lock1", `{"lock_id":"6148","online":1}`, nil); code != 200 {
+		t.Fatalf("same numeric id: %d", code)
+	}
+	if code := post(h, "/cloud/wrong-secret-0000000000000000/lock1", body, nil); code != 404 {
 		t.Fatalf("wrong secret: %d", code)
 	}
-	if code := post(h, "/cloud/"+secret, `{"lock_id":"other","online":1}`, nil); code != 404 {
+	if code := post(h, "/cloud/"+secret+"/other", body, nil); code != 404 {
 		t.Fatalf("unknown lock: %d", code)
 	}
-	if code := post(h, "/cloud/"+secret, `garbage`, nil); code != 400 {
+	if code := post(h, "/cloud/"+secret, body, nil); code != 404 {
+		t.Fatalf("the single shared URL is gone: %d", code)
+	}
+	if code := post(h, "/cloud/"+secret+"/lock1", `garbage`, nil); code != 400 {
 		t.Fatalf("garbage: %d", code)
 	}
-	if code := post(handler(sink, 0, ""), "/cloud/"+secret, body, nil); code != 404 {
+	if code := post(handler(sink, 0, ""), "/cloud/"+secret+"/lock1", body, nil); code != 404 {
 		t.Fatalf("cloud route must be off without a secret: %d", code)
+	}
+}
+
+func TestCloudWebhookForAnotherLockIsRejected(t *testing.T) {
+	var buf bytes.Buffer
+	sink := &fakeSink{boundID: "6148"}
+	h := webhook.NewHandler(webhook.Options{Sink: sink, CloudSecret: secret, Now: func() time.Time { return now },
+		Log: slog.New(slog.NewTextHandler(&buf, nil))})
+	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":"7001","key_account_email":"jane@example.com"}`
+	if code := post(h, "/cloud/"+secret+"/lock1", body, nil); code != 409 {
+		t.Fatalf("code %d", code)
+	}
+	if len(sink.cloudEvents) != 0 {
+		t.Fatal("event delivered")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "7001") || !strings.Contains(out, "lock1") || strings.Contains(out, "jane@") || strings.Contains(out, secret) {
+		t.Fatalf("log: %s", out)
 	}
 }
 
@@ -185,7 +218,7 @@ func TestURLs(t *testing.T) {
 	if err != nil || u != "http://127.0.0.1:8099/webhook/lock1" {
 		t.Fatalf("%q %v", u, err)
 	}
-	if got := webhook.CloudURL("https://loqed.example.com/", secret); got != "https://loqed.example.com/cloud/"+secret {
+	if got := webhook.CloudURL("https://loqed.example.com/", secret, "Qn Zk"); got != "https://loqed.example.com/cloud/"+secret+"/Qn%20Zk" {
 		t.Fatal(got)
 	}
 }

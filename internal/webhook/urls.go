@@ -56,6 +56,7 @@ func LikelyContainerAddress(local net.IP, bridgeIP string) bool {
 	return dockerNets.Contains(l.Unmap()) && !dockerNets.Contains(b.Unmap())
 }
 
-func CloudURL(publicBase, secret string) string {
-	return strings.TrimRight(publicBase, "/") + "/cloud/" + secret
+// CloudURL is the URL to register for one lock at app.loqed.com.
+func CloudURL(publicBase, secret, lockID string) string {
+	return strings.TrimRight(publicBase, "/") + "/cloud/" + secret + "/" + url.PathEscape(lockID)
 }

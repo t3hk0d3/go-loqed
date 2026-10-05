@@ -33,6 +33,9 @@ type LockRecord struct {
 	KeySecret      string `json:"key_secret"`
 	BridgeKey      string `json:"bridge_key"`
 	BackendKey     string `json:"backend_key"`
+	// CloudWebhookID is the cloud's numeric lock id, learned from the first
+	// cloud webhook on this lock's URL (the Lock API does not expose it).
+	CloudWebhookID string `json:"cloud_webhook_id,omitempty"`
 }
 
 func (r LockRecord) HasLocalCredentials() bool {
@@ -41,7 +44,8 @@ func (r LockRecord) HasLocalCredentials() bool {
 }
 
 // Merge returns fresh, keeping old's local-credential fields where fresh
-// lacks them (the cloud's local fields are undocumented and may vanish).
+// lacks them (the cloud's local fields are undocumented and may vanish) and
+// the learned cloud webhook id.
 func Merge(old, fresh LockRecord) LockRecord {
 	if fresh.BridgeIP == "" {
 		fresh.BridgeIP = old.BridgeIP
@@ -55,6 +59,9 @@ func Merge(old, fresh LockRecord) LockRecord {
 	if fresh.LocalID == nil && old.LocalID != nil {
 		v := *old.LocalID
 		fresh.LocalID = &v
+	}
+	if fresh.CloudWebhookID == "" {
+		fresh.CloudWebhookID = old.CloudWebhookID
 	}
 	return fresh
 }

@@ -234,8 +234,8 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	// Cloud route: enriches the bridge event with the key name.
-	cloudBody := `{"requested_state":"NIGHT_LOCK","event_type":"STATE_CHANGED_NIGHT_LOCK","lock_id":"lock1","key_local_id":255,"key_name_user":"Hallway phone"}`
-	resp, err = http.Post("http://"+addr+"/cloud/"+cfg.Webhook.CloudSecret, "application/json", strings.NewReader(cloudBody))
+	cloudBody := `{"requested_state":"NIGHT_LOCK","event_type":"STATE_CHANGED_NIGHT_LOCK","lock_id":6148,"key_local_id":"","key_name_user":"Hallway phone"}`
+	resp, err = http.Post("http://"+addr+"/cloud/"+cfg.Webhook.CloudSecret+"/lock1", "application/json", strings.NewReader(cloudBody))
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("cloud webhook: %v %v", resp, err)
 	}
@@ -248,6 +248,9 @@ func TestEndToEnd(t *testing.T) {
 	snap, _, _ := store.Open(cachePath)
 	if c := snap.Snapshot(); len(c.Budget.Calls) != 1 || len(c.PublishedIDs) != 1 || c.PublishedIDs[0] != "lock1" || c.InstallID == "" {
 		t.Fatalf("cache after run: budget %v published %v install %q", c.Budget.Calls, c.PublishedIDs, c.InstallID)
+	}
+	if rec, _ := snap.Snapshot().Find("lock1"); rec.CloudWebhookID != "6148" {
+		t.Fatalf("the cloud lock id must be learned and persisted: %+v", rec)
 	}
 }
 

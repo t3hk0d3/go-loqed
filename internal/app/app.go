@@ -160,8 +160,17 @@ func Run(ctx context.Context, o Options) error {
 			return webhook.PrivateURL(cfg.Webhook.PrivateURL, port, rec.ID, rec.BridgeIP)
 		},
 		CloudWebhooks: cfg.Webhook.PublicURL != "",
-		Now:           now,
-		Log:           log,
+		SaveCloudWebhookID: func(lockID, id string) error {
+			return st.Update(func(c *store.Cache) {
+				for i := range c.Locks {
+					if c.Locks[i].ID == lockID {
+						c.Locks[i].CloudWebhookID = id
+					}
+				}
+			})
+		},
+		Now: now,
+		Log: log,
 	}
 	timing := gateway.DefaultTiming(cfg.LivenessInterval.D(), cfg.ReconcileInterval.D(), budget.Spacing())
 	sups := make([]*gateway.Supervisor, 0, len(selected))
@@ -199,7 +208,10 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}()
 	if cloudSecret != "" {
-		log.Info("register this URL as the webhook in the API section of app.loqed.com", "url", webhook.CloudURL(cfg.Webhook.PublicURL, cloudSecret))
+		for _, r := range selected {
+			log.Info("register this URL as the webhook of this lock in the API section of app.loqed.com",
+				"lock", r.Name, "url", webhook.CloudURL(cfg.Webhook.PublicURL, cloudSecret, r.ID))
+		}
 	}
 	go forwardCommands(runCtx, mq, manager, log)
 	go refreshByAge(runCtx, refresher, cfg.CacheMaxAge.D(), log)

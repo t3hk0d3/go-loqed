@@ -130,8 +130,9 @@ func TestUpdateWriteFailureKeepsMemoryAndWrapsErrWrite(t *testing.T) {
 func TestMergeKeepsLocalCredentials(t *testing.T) {
 	id := 3
 	old := store.LockRecord{ID: "a", Name: "Old", BridgeIP: "192.0.2.1", KeySecret: "k", BridgeKey: "b", LocalID: &id}
+	old.CloudWebhookID = "6148"
 	merged := store.Merge(old, store.LockRecord{ID: "a", Name: "New"})
-	if merged.Name != "New" || !store.SameLocal(merged, old) {
+	if merged.Name != "New" || !store.SameLocal(merged, old) || merged.CloudWebhookID != "6148" {
 		t.Fatalf("got %+v", merged)
 	}
 	changed := store.Merge(old, store.LockRecord{ID: "a", BridgeIP: "192.0.2.9"})

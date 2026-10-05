@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -78,8 +79,11 @@ type Deps struct {
 	ProbeCloud    func(ctx context.Context) error // cloud host TCP reachability (unbudgeted)
 	WebhookURL    func(rec store.LockRecord) (string, error)
 	CloudWebhooks bool // webhook.public_url is set
-	Now           func() time.Time
-	Log           *slog.Logger
+	// SaveCloudWebhookID persists the numeric cloud lock id first seen on a
+	// lock's cloud webhook URL (nil: keep it in memory only).
+	SaveCloudWebhookID func(lockID, id string) error
+	Now                func() time.Time
+	Log                *slog.Logger
 }
 
 type Timing struct {
@@ -239,6 +243,35 @@ func (s *Supervisor) BridgeKey() ([]byte, bool) {
 	return k, err == nil
 }
 
+// ErrCloudIDMismatch: a cloud webhook on this lock's URL names another lock.
+var ErrCloudIDMismatch = errors.New("gateway: cloud webhook is for a different lock")
+
+// BindCloudID checks the numeric lock id of a cloud webhook against the one
+// learned from the first webhook on this lock's URL (and learns it then).
+// It may be called from any goroutine.
+func (s *Supervisor) BindCloudID(id string) error {
+	s.mu.Lock()
+	switch s.rec.CloudWebhookID {
+	case id:
+		s.mu.Unlock()
+		return nil
+	case "":
+		s.rec.CloudWebhookID = id
+		s.mu.Unlock()
+	default:
+		bound := s.rec.CloudWebhookID
+		s.mu.Unlock()
+		return fmt.Errorf("%w: this URL belongs to cloud lock %s, the webhook names %s", ErrCloudIDMismatch, bound, id)
+	}
+	s.log.Info("learned the cloud lock id from its first cloud webhook", "cloud_lock_id", id)
+	if s.d.SaveCloudWebhookID != nil {
+		if err := s.d.SaveCloudWebhookID(s.id, id); err != nil {
+			s.log.Warn("could not save the cloud lock id", "err", err)
+		}
+	}
+	return nil
+}
+
 // Deliver queues a message without blocking; false means the queue is full.
 func (s *Supervisor) Deliver(msg any) bool {
 	select {
@@ -351,6 +384,9 @@ func (s *Supervisor) setMode(m model.Mode) {
 
 func (s *Supervisor) setRecord(rec store.LockRecord) {
 	s.mu.Lock()
+	if rec.CloudWebhookID == "" {
+		rec.CloudWebhookID = s.rec.CloudWebhookID
+	}
 	s.rec = ApplySetting(rec, s.setting)
 	s.mu.Unlock()
 	s.bridge = nil

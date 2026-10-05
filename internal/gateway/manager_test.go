@@ -18,8 +18,11 @@ func TestManagerDispatch(t *testing.T) {
 	if err := m.DeliverBridgeEvent("nope", bridge.OnlineEvent{}); !errors.Is(err, ErrUnknownLock) {
 		t.Fatalf("got %v", err)
 	}
-	if err := m.DeliverCloudEvent(cloud.WebhookEvent{LockID: "lock1"}); err != nil {
+	if err := m.DeliverCloudEvent("lock1", cloud.WebhookEvent{LockID: "6148"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := m.DeliverCloudEvent("nope", cloud.WebhookEvent{LockID: "6148"}); !errors.Is(err, ErrUnknownLock) {
+		t.Fatalf("got %v", err)
 	}
 	if err := m.DeliverCommand("lock1", model.CommandLock, "", h.now); err != nil {
 		t.Fatal(err)
@@ -64,5 +67,35 @@ func TestManagerRemoveStopsSupervisor(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run must return once every supervisor stopped")
+	}
+}
+
+func TestManagerBindsCloudWebhookID(t *testing.T) {
+	var saved []string
+	h := newHarness(t, testRecord(), config.LockSetting{}, func(d *Deps) {
+		d.SaveCloudWebhookID = func(lockID, id string) error { saved = append(saved, lockID+"="+id); return nil }
+	})
+	m := NewManager([]*Supervisor{h.s})
+	if err := m.DeliverCloudEvent("lock1", cloud.WebhookEvent{LockID: "6148"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeliverCloudEvent("lock1", cloud.WebhookEvent{LockID: "6148"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeliverCloudEvent("lock1", cloud.WebhookEvent{LockID: "7001"}); !errors.Is(err, ErrCloudIDMismatch) {
+		t.Fatalf("got %v", err)
+	}
+	if len(saved) != 1 || saved[0] != "lock1=6148" || h.s.Record().CloudWebhookID != "6148" {
+		t.Fatalf("saved %v record %+v", saved, h.s.Record())
+	}
+}
+
+func TestCloudWebhookIDSurvivesRecordRefresh(t *testing.T) {
+	rec := testRecord()
+	rec.CloudWebhookID = "6148"
+	h := newHarness(t, rec, config.LockSetting{})
+	h.s.setRecord(testRecord()) // a refresh never carries the id
+	if h.s.Record().CloudWebhookID != "6148" {
+		t.Fatalf("record %+v", h.s.Record())
 	}
 }

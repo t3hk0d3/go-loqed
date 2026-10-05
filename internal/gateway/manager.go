@@ -101,8 +101,20 @@ func (m *Manager) DeliverBridgeEvent(lockID string, ev bridge.Event) error {
 	return m.deliver(lockID, BridgeEventMsg{Event: ev})
 }
 
-func (m *Manager) DeliverCloudEvent(ev cloud.WebhookEvent) error {
-	return m.deliver(ev.LockID, CloudEventMsg{Event: ev})
+// DeliverCloudEvent routes a cloud webhook by the lock id in its URL. The
+// body's numeric lock id must match the one learned for that lock.
+func (m *Manager) DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error {
+	s, ok := m.get(lockID)
+	if !ok {
+		return ErrUnknownLock
+	}
+	if err := s.BindCloudID(ev.LockID); err != nil {
+		return err
+	}
+	if !s.Deliver(CloudEventMsg{Event: ev}) {
+		return ErrBusy
+	}
+	return nil
 }
 
 func (m *Manager) DeliverCommand(lockID string, c model.Command, id string, at time.Time) error {
