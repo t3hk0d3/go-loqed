@@ -15,8 +15,14 @@ import (
 func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 	now := s.d.Now()
 	s.lastCloudEventAt = now
+	lockEvent := e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState
+	if lockEvent && s.isDuplicate(feedCloud, e.EventType, e.KeyLocalID, now) {
+		return
+	}
 	if s.mode == model.ModeLocal && s.webhookOK {
-		s.enrichFromCloud(now, e)
+		if lockEvent && !s.enrichFromCloud(now, e) {
+			s.holdCloud(now, e)
+		}
 		return
 	}
 	if s.mode == model.ModeOffline {
@@ -42,10 +48,10 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 			s.move = movement{}
 		}
 		s.onReached(now, e.BoltState, e.Jammed)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType), false)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType), feedCloud)
 	case cloud.KindGoToState:
 		s.startMovement(now, e.GoToState)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock), false)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock), feedCloud)
 	case cloud.KindSignal:
 		if e.BatteryPercentage != nil && *e.BatteryPercentage >= 0 {
 			s.state.BatteryPercentage = e.BatteryPercentage
@@ -77,19 +83,19 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 
 // enrichFromCloud adds key_name_user to the bridge event it describes:
 // same event type and key id, within EnrichWindow. It never emits an event.
-func (s *Supervisor) enrichFromCloud(now time.Time, e cloud.WebhookEvent) {
-	if e.Kind != cloud.KindStateReached && e.Kind != cloud.KindGoToState {
-		return
-	}
+// It reports whether the cloud copy matched a bridge event.
+func (s *Supervisor) enrichFromCloud(now time.Time, e cloud.WebhookEvent) bool {
 	last := s.lastBridgeEvent
-	if last == nil || e.KeyNameUser == "" || s.state.LastKeyName != nil ||
-		!strings.EqualFold(last.eventType, e.EventType) || now.Sub(last.at) > s.t.EnrichWindow ||
+	if last == nil || !strings.EqualFold(last.eventType, e.EventType) || now.Sub(last.at) > s.t.EnrichWindow ||
 		!sameKey(last.keyID, e.KeyLocalID) {
-		return
+		return false
 	}
-	name := e.KeyNameUser
-	s.state.LastKeyName = &name
-	s.publish()
+	if e.KeyNameUser != "" && s.state.LastKeyName == nil {
+		name := e.KeyNameUser
+		s.state.LastKeyName = &name
+		s.publish()
+	}
+	return true
 }
 
 func sameKey(a, b *int) bool {

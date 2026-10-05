@@ -53,6 +53,7 @@ func (s *Supervisor) sendViaBridge(ctx, cctx context.Context, c model.Command) {
 	switch {
 	case err == nil:
 		s.httpFailures = 0
+		s.lastCommandSentAt = now
 		s.awaitConfirm(now, c.Target())
 	case errors.Is(err, loqed.ErrUnreachable), errors.Is(err, errNoBridge):
 		// Never delivered: the cloud may send it.
@@ -103,6 +104,7 @@ func (s *Supervisor) sendViaCloud(cctx context.Context, c model.Command) {
 	err := s.d.Cloud.Command(cctx, s.id, c.Target())
 	now := s.d.Now()
 	if err == nil {
+		s.lastCommandSentAt = now
 		moving := c.Moving()
 		s.state.Lock = &moving
 		// Poll data fetched before the command must not overwrite this.

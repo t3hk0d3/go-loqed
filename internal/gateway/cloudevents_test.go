@@ -104,7 +104,11 @@ func TestCloudEventOutsideWindowOrUnmatchedIsDropped(t *testing.T) {
 	if len(h.pub.states) != states {
 		t.Fatal("unmatched cloud event must be dropped in local mode")
 	}
+	h.run(31 * time.Second) // the held cloud copy expires
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
+	if h.state().LastKeyName != nil {
+		t.Fatal("an expired cloud copy must not name a later bridge event")
+	}
 	h.now = h.now.Add(31 * time.Second)
 	h.send(cloudReached("late"))
 	if h.state().LastKeyName != nil {

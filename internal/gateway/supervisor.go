@@ -94,6 +94,9 @@ type Timing struct {
 	CloudPoll         time.Duration // how often cloud mode asks the budget for a poll
 	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
 	StaleGrace        time.Duration
+	DuplicateWindow   time.Duration // same event from the same feed within this is a duplicate
+	AutoLatchWindow   time.Duration // a keyless latch this soon after an open is the automatic latch
+	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
 	CommandMaxAge     time.Duration
 	EnrichWindow      time.Duration
 	RequestTimeout    time.Duration
@@ -107,7 +110,8 @@ func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 		WebhookConfirm: 30 * time.Second, StatusRecheck: time.Minute, WebhookRetry: 10 * time.Minute,
 		StatusEventWindow: 5 * time.Minute, StatusMoveWindow: 3 * time.Minute,
 		CloudConfirm: 5 * time.Second, CloudPoll: time.Minute, CloudPollSpacing: pollSpacing,
-		StaleGrace:    10 * time.Minute,
+		StaleGrace:      10 * time.Minute,
+		DuplicateWindow: 10 * time.Second, AutoLatchWindow: 5 * time.Second, GatewayWindow: time.Minute,
 		CommandMaxAge: 10 * time.Second, EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
 		FailureThreshold: 3,
 	}
@@ -186,6 +190,11 @@ type Supervisor struct {
 	lastBridgeEvent  *recentEvent
 	lastCloudEventAt time.Time
 
+	seen              [2][]feedEvent // recent events per feed (duplicate drop)
+	held              []heldCloud    // cloud copies waiting for their bridge copy
+	lastOpenAt        time.Time      // last STATE_CHANGED_OPEN (automatic latch)
+	lastCommandSentAt time.Time      // last gateway command written to the bridge or cloud
+
 	warned map[string]*warnState
 }
 
@@ -262,6 +271,7 @@ func (s *Supervisor) tick(ctx context.Context) {
 		return // shutting down: no new requests
 	}
 	now := s.d.Now()
+	s.pruneHeld(now)
 	if !s.cloudConfirmAt.IsZero() && !now.Before(s.cloudConfirmAt) {
 		s.cloudConfirmAt = time.Time{}
 		s.pollCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
@@ -346,7 +356,7 @@ func (s *Supervisor) warn(msg string, args ...any) {
 }
 
 // recordEvent applies a lock event, publishes state and the HA event.
-func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, cloudKeyName string, t model.Transition, fromBridge bool) {
+func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, cloudKeyName string, t model.Transition, f feed) {
 	s.state.Apply(t)
 	if t.SetBolt || t.SetLock {
 		s.state.StateStale = false
@@ -355,16 +365,23 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, c
 	if t.SetBolt {
 		s.lastBoltEventAt = now
 	}
+	autoLatch := s.isAutoLatch(now, eventType, key, t)
+	if t.SetBolt && t.Bolt == loqed.BoltOpen {
+		s.lastOpenAt = now
+	}
 	s.lastEventAt = now
-	key := rawKey
 	name := s.keyName(key, cloudKeyName)
 	at := now.UTC().Truncate(time.Second)
 	s.state.LastEvent, s.state.LastKeyID, s.state.LastKeyName, s.state.LastEventAt = eventType, key, name, &at
-	if fromBridge {
+	if f == feedBridge {
 		s.lastBridgeEvent = &recentEvent{eventType: strings.ToUpper(eventType), keyID: key, at: now}
 	}
 	s.publish()
-	ev := model.Event{EventType: t.Event, Reason: eventType, Source: model.SourceFor(eventType, key, false), KeyLocalID: key, KeyName: name}
+	if autoLatch {
+		return
+	}
+	source := model.SourceFor(eventType, key, s.isGatewayKey(key) && s.gatewayActive(now))
+	ev := model.Event{EventType: t.Event, Reason: eventType, Source: source, KeyLocalID: key, KeyName: name}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {
 		s.log.Warn("publishing event failed", "err", err)
 	}
