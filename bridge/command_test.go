@@ -35,9 +35,13 @@ func TestCommandMatchesGoldenVectors(t *testing.T) {
 }
 
 func TestCommandRejectsUnknownAction(t *testing.T) {
-	c := newTestClient(t, http.NotFoundHandler())
-	if err := c.Command(context.Background(), bridge.Action(9)); err == nil {
-		t.Fatal("expected error")
+	for _, a := range []bridge.Action{0, 9} {
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("request sent for invalid action")
+		}))
+		if err := c.Command(context.Background(), a); err == nil {
+			t.Errorf("action %d: expected error", a)
+		}
 	}
 }
 
