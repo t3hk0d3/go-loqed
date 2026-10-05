@@ -48,8 +48,8 @@ Sources: LOQED support docs (updated June 2026), `loqedAPI` 2.1.16 (pinned by HA
   - `POST /webhooks` — body `{url, trigger_state_changed_open, trigger_state_changed_latch, trigger_state_changed_night_lock, trigger_state_changed_unknown, trigger_state_goto_open, trigger_state_goto_latch, trigger_state_goto_night_lock, trigger_battery, trigger_online_status}` (each 0/1; bit 0..8 of a flags bitmap in that order). `HASH = sha256(url | flags as u32 BE | ts8 | K)`.
   - `DELETE /webhooks/{id}` — `HASH = sha256(id as u64 BE | ts8 | K)`.
 - Incoming webhooks (bridge → gateway): `POST` with headers `TIMESTAMP`, `HASH = sha256(body | ts8 | K)`. Receiver must reject requests missing either header (HA core returns 400 since 2026-10-01) and `|now − ts| > 10 s`. The bridge accepts any URL, including public HTTPS (HA registers Nabu Casa cloudhook URLs on the bridge). Payload families:
-  - State reached: `{mac_wifi, mac_ble, requested_state, event_type, key_local_id}`; `event_type` ∈ `STATE_CHANGED_OPEN|LATCH|NIGHT_LOCK|UNKNOWN`, `*_REMOTE` variants, `MOTOR_STALL`, `GO_TO_STATE_TOUCH_TO_LOCK`, …
-  - Going to state: `{mac_wifi, mac_ble, go_to_state (OPEN|DAY_LOCK|NIGHT_LOCK), event_type (GO_TO_STATE_*), key_local_id}`; `key_local_id` 255 = unknown, may be `null`.
+  - State reached: `{mac_wifi, mac_ble, requested_state, event_type, key_local_id}`; `event_type` ∈ `STATE_CHANGED_OPEN|LATCH|NIGHT_LOCK|UNKNOWN`, `*_REMOTE` variants, `MOTOR_STALL`, …. The reached state comes from `event_type`; `requested_state` is only what was asked for (see 4.1).
+  - Going to state: `{mac_wifi, mac_ble, go_to_state (OPEN|DAY_LOCK|NIGHT_LOCK), event_type (GO_TO_STATE_*, e.g. GO_TO_STATE_TOUCH_TO_LOCK), key_local_id}`; `go_to_state` may be absent (target then comes from the event-type suffix); `key_local_id` 255 = unknown, may be `null`.
   - Battery: `{mac_wifi, mac_ble, battery_type, battery_percentage}`.
   - Online status: `{mac_wifi, mac_ble, wifi_strength, ble_strength}`; `ble_strength = -1` means lock offline.
   Numeric fields may arrive as JSON strings or numbers; parsers must accept both.
@@ -408,7 +408,7 @@ One HTTP listener (`webhook.listen`) serves:
 
 - `POST /webhook/<lock-id>` (bridge, private): look up lock (unknown → 404); missing `TIMESTAMP`/`HASH` → 400; verify via `bridge.ParseEvent` (bad hash → 401, stale timestamp → 401 and log observed clock skew; only reachable with a valid hash); forward to supervisor (queue full → 503); 200.
 - `POST /cloud/<cloud_secret>` (cloud, public): only routed when `public_url` is set; wrong secret → 404 (constant-time compare); decode via `cloud.ParseWebhook`; route by `lock_id` (unknown → 404); forward to supervisor; 200. The path secret is the only authentication (see V6); it is 32 random bytes, base64url, and never logged except in the one startup line.
-- `GET /healthz`: 200 with JSON per-lock `{mode, available, last_event_at}` and `mqtt_connected`; 503 only if MQTT has been disconnected for more than 5 minutes (so a broker restart does not make the add-on watchdog restart the gateway).
+- `GET /healthz`: 200 with JSON `{mqtt_connected, locks: {<id>: {mode, available, last_event_at}}}`; 503 only if MQTT has been disconnected for more than 5 minutes (so a broker restart does not make the add-on watchdog restart the gateway).
 - Body size limit 64 KiB on both webhook routes. Server timeouts: read header 5 s, read 15 s, write 15 s, idle 60 s. If the listener fails at runtime, `Run` returns the error (the process exits non-zero and is restarted) instead of silently running without webhooks.
 
 URLs:

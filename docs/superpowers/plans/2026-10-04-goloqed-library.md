@@ -109,6 +109,10 @@ linters:
     - gosec
     - misspell
     - unconvert
+  settings:
+    misspell:
+      ignore-rules:
+        - mosquitto # the MQTT broker
   exclusions:
     presets:
       - std-error-handling
