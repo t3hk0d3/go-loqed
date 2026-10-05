@@ -31,12 +31,26 @@
       "value_template": "{{ value_json.battery_voltage }}"
     },
     "ble_signal": {
+      "availability": [
+        {
+          "topic": "loqed/status"
+        },
+        {
+          "topic": "loqed/lock1/availability"
+        },
+        {
+          "topic": "loqed/lock1/state",
+          "value_template": "{{ 'offline' if value_json.ble_strength == -1 else 'online' }}"
+        }
+      ],
+      "availability_mode": "all",
       "entity_category": "diagnostic",
       "name": "Bluetooth signal",
       "platform": "sensor",
       "state_class": "measurement",
       "state_topic": "loqed/lock1/state",
       "unique_id": "loqed_lock1_ble_signal",
+      "unit_of_measurement": "%",
       "value_template": "{{ value_json.ble_strength }}"
     },
     "connection_mode": {
@@ -79,6 +93,27 @@
       "unique_id": "loqed_lock1_last_change_reason",
       "value_template": "{{ value_json.last_event }}"
     },
+    "last_command": {
+      "device_class": "enum",
+      "entity_category": "diagnostic",
+      "json_attributes_template": "{{ {'command': value_json.command, 'id': value_json.id, 'via': value_json.via, 'attempts': value_json.attempts, 'error': value_json.error, 'updated_at': value_json.updated_at} | tojson }}",
+      "json_attributes_topic": "loqed/lock1/command_status",
+      "name": "Last command",
+      "options": [
+        "pending",
+        "sending",
+        "sent",
+        "accepted",
+        "confirmed",
+        "failed",
+        "expired",
+        "superseded"
+      ],
+      "platform": "sensor",
+      "state_topic": "loqed/lock1/command_status",
+      "unique_id": "loqed_lock1_last_command",
+      "value_template": "{{ value_json.status }}"
+    },
     "lock": {
       "command_topic": "loqed/lock1/command",
       "json_attributes_template": "{{ {'state_stale': value_json.state_stale, 'mode': value_json.mode, 'last_event_at': value_json.last_event_at} | tojson }}",
@@ -118,6 +153,15 @@
       "unique_id": "loqed_lock1_state_stale",
       "value_template": "{{ 'ON' if value_json.state_stale else 'OFF' }}"
     },
+    "token_expires": {
+      "device_class": "timestamp",
+      "entity_category": "diagnostic",
+      "name": "Token expires",
+      "platform": "sensor",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_token_expires",
+      "value_template": "{{ value_json.token_expires_at if value_json.token_expires_at is defined else None }}"
+    },
     "wifi_signal": {
       "entity_category": "diagnostic",
       "name": "Wi-Fi signal",
@@ -125,6 +169,7 @@
       "state_class": "measurement",
       "state_topic": "loqed/lock1/state",
       "unique_id": "loqed_lock1_wifi_signal",
+      "unit_of_measurement": "%",
       "value_template": "{{ value_json.wifi_strength }}"
     }
   },

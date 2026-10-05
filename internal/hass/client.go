@@ -35,6 +35,7 @@ type ClientConfig struct {
 type Command struct {
 	LockID  string
 	Command model.Command
+	ID      string // optional client id echoed in command_status
 	At      time.Time
 }
 
@@ -49,6 +50,7 @@ type Client struct {
 	locks     map[string]LockInfo // by topic id
 	removed   []string            // real lock ids
 	states    map[string][]byte   // by real lock id
+	cmdStatus map[string][]byte   // by real lock id
 	avail     map[string]string   // by real lock id
 	downSince time.Time           // zero while connected
 
@@ -62,7 +64,7 @@ const publishTimeout = 5 * time.Second
 
 func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), now: cfg.Now,
-		locks: map[string]LockInfo{}, states: map[string][]byte{}, avail: map[string]string{}}
+		locks: map[string]LockInfo{}, states: map[string][]byte{}, cmdStatus: map[string][]byte{}, avail: map[string]string{}}
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -140,6 +142,7 @@ func (c *Client) SetLocks(locks []LockInfo, removed []string) {
 	c.removed = slices.DeleteFunc(pending, func(id string) bool { _, ok := c.locks[TopicID(id)]; return ok })
 	for _, id := range removed {
 		delete(c.states, id)
+		delete(c.cmdStatus, id)
 		delete(c.avail, id)
 	}
 	c.mu.Unlock()
@@ -159,6 +162,20 @@ func (c *Client) PublishState(lockID string, s model.State) error {
 	c.states[lockID] = b
 	c.mu.Unlock()
 	return c.publish(c.cfg.Topics.State(TopicID(lockID)), true, b)
+}
+
+// PublishCommandStatus publishes the retained command_status document.
+func (c *Client) PublishCommandStatus(lockID string, s model.CommandStatus) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	c.retainMu.Lock()
+	defer c.retainMu.Unlock()
+	c.mu.Lock()
+	c.cmdStatus[lockID] = b
+	c.mu.Unlock()
+	return c.publish(c.cfg.Topics.CommandStatus(TopicID(lockID)), true, b)
 }
 
 func (c *Client) PublishEvent(lockID string, e model.Event) error {
@@ -218,13 +235,16 @@ func (c *Client) onConnect() {
 	c.retainMu.Lock()
 	defer c.retainMu.Unlock()
 	c.mu.Lock()
-	states, avail := maps.Clone(c.states), maps.Clone(c.avail)
+	states, cmdStatus, avail := maps.Clone(c.states), maps.Clone(c.cmdStatus), maps.Clone(c.avail)
 	c.mu.Unlock()
 	for id, v := range avail {
 		_ = c.publish(t.Availability(TopicID(id)), true, []byte(v))
 	}
 	for id, b := range states {
 		_ = c.publish(t.State(TopicID(id)), true, b)
+	}
+	for id, b := range cmdStatus {
+		_ = c.publish(t.CommandStatus(TopicID(id)), true, b)
 	}
 }
 
@@ -261,6 +281,7 @@ func (c *Client) publishDiscovery() {
 	for _, id := range removed {
 		err := errors.Join(
 			c.publish(t.State(TopicID(id)), true, []byte{}),
+			c.publish(t.CommandStatus(TopicID(id)), true, []byte{}),
 			c.publish(t.Availability(TopicID(id)), true, []byte{}))
 		if c.cfg.HAEnabled {
 			err = errors.Join(err, c.publish(t.Discovery(TopicID(id)), true, []byte{}))
@@ -310,13 +331,13 @@ func (c *Client) onCommand(_ mqtt.Client, m mqtt.Message) {
 		c.log.Warn("command for unknown lock ignored", "topic", m.Topic())
 		return
 	}
-	cmd, ok := model.ParseCommand(string(m.Payload()))
-	if !ok {
-		c.log.Warn("unknown command ignored; use LOCK, UNLOCK or OPEN", "topic", m.Topic())
+	cmd, id, err := model.ParseCommandMessage(m.Payload())
+	if err != nil {
+		c.log.Warn("invalid command ignored", "topic", m.Topic(), "err", err)
 		return
 	}
 	select {
-	case c.commands <- Command{LockID: l.ID, Command: cmd, At: c.now()}:
+	case c.commands <- Command{LockID: l.ID, Command: cmd, ID: id, At: c.now()}:
 	default:
 		c.log.Warn("command queue full; command dropped", "lock_id", l.ID, "command", cmd)
 	}

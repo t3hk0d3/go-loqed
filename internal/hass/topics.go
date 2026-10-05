@@ -14,6 +14,9 @@ func (t Topics) State(id string) string        { return t.Base + "/" + id + "/st
 func (t Topics) Event(id string) string        { return t.Base + "/" + id + "/event" }
 func (t Topics) Command(id string) string      { return t.Base + "/" + id + "/command" }
 func (t Topics) CommandWildcard() string       { return t.Base + "/+/command" }
+func (t Topics) CommandStatus(id string) string {
+	return t.Base + "/" + id + "/command_status"
+}
 func (t Topics) Discovery(id string) string {
 	return t.DiscoveryPrefix + "/device/loqed_" + id + "/config"
 }

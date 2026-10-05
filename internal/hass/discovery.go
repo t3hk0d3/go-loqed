@@ -36,6 +36,11 @@ func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
 		}
 		return c
 	}
+	statuses := make([]string, len(model.CommandStatusValues))
+	for i, v := range model.CommandStatusValues {
+		statuses[i] = string(v)
+	}
+	cmdStatus := t.CommandStatus(tid)
 	eventTypes := make([]string, len(model.EventTypes))
 	for i, e := range model.EventTypes {
 		eventTypes[i] = string(e)
@@ -58,9 +63,13 @@ func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
 		"battery_voltage": sensor("battery_voltage", "Battery voltage", "battery_voltage",
 			map[string]any{"device_class": "voltage", "unit_of_measurement": "V", "state_class": "measurement", "entity_category": "diagnostic"}),
 		"wifi_signal": sensor("wifi_signal", "Wi-Fi signal", "wifi_strength",
-			map[string]any{"state_class": "measurement", "entity_category": "diagnostic"}),
+			map[string]any{"unit_of_measurement": "%", "state_class": "measurement", "entity_category": "diagnostic"}),
+		// ble_strength -1 means the lock itself is offline: no reading then.
 		"ble_signal": sensor("ble_signal", "Bluetooth signal", "ble_strength",
-			map[string]any{"state_class": "measurement", "entity_category": "diagnostic"}),
+			map[string]any{"unit_of_measurement": "%", "state_class": "measurement", "entity_category": "diagnostic",
+				"availability": []map[string]string{{"topic": t.Status()}, {"topic": t.Availability(tid)},
+					{"topic": state, "value_template": "{{ 'offline' if value_json.ble_strength == -1 else 'online' }}"}},
+				"availability_mode": "all"}),
 		"lock_online": map[string]any{
 			"platform": "binary_sensor", "name": "Lock online", "unique_id": uid + "_lock_online", "state_topic": state,
 			"value_template": "{{ 'ON' if value_json.lock_online else 'OFF' }}", "device_class": "connectivity", "entity_category": "diagnostic",
@@ -75,6 +84,17 @@ func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
 			"json_attributes_topic": state,
 			"json_attributes_template": "{{ {'key_local_id': value_json.last_key_id, 'key_name': value_json.last_key_name, " +
 				"'last_event_at': value_json.last_event_at} | tojson }}",
+		}),
+		"last_command": map[string]any{
+			"platform": "sensor", "name": "Last command", "unique_id": uid + "_last_command", "state_topic": cmdStatus,
+			"value_template": "{{ value_json.status }}", "device_class": "enum", "options": statuses, "entity_category": "diagnostic",
+			"json_attributes_topic": cmdStatus,
+			"json_attributes_template": "{{ {'command': value_json.command, 'id': value_json.id, 'via': value_json.via, " +
+				"'attempts': value_json.attempts, 'error': value_json.error, 'updated_at': value_json.updated_at} | tojson }}",
+		},
+		"token_expires": sensor("token_expires", "Token expires", "token_expires_at", map[string]any{
+			"device_class": "timestamp", "entity_category": "diagnostic",
+			"value_template": "{{ value_json.token_expires_at if value_json.token_expires_at is defined else None }}",
 		}),
 		"event": map[string]any{
 			"platform": "event", "name": "Lock event", "unique_id": uid + "_event", "state_topic": t.Event(tid), "event_types": eventTypes,

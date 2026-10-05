@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/t3hk0d3/go-loqed/internal/hass"
+	"github.com/t3hk0d3/go-loqed/internal/model"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -17,14 +18,15 @@ var topics = hass.Topics{Base: "loqed", DiscoveryPrefix: "homeassistant"}
 
 func TestTopics(t *testing.T) {
 	cases := map[string]string{
-		topics.Status():            "loqed/status",
-		topics.Availability("abc"): "loqed/abc/availability",
-		topics.State("abc"):        "loqed/abc/state",
-		topics.Event("abc"):        "loqed/abc/event",
-		topics.Command("abc"):      "loqed/abc/command",
-		topics.CommandWildcard():   "loqed/+/command",
-		topics.Discovery("abc"):    "homeassistant/device/loqed_abc/config",
-		topics.HAStatus():          "homeassistant/status",
+		topics.Status():             "loqed/status",
+		topics.Availability("abc"):  "loqed/abc/availability",
+		topics.State("abc"):         "loqed/abc/state",
+		topics.Event("abc"):         "loqed/abc/event",
+		topics.Command("abc"):       "loqed/abc/command",
+		topics.CommandStatus("abc"): "loqed/abc/command_status",
+		topics.CommandWildcard():    "loqed/+/command",
+		topics.Discovery("abc"):     "homeassistant/device/loqed_abc/config",
+		topics.HAStatus():           "homeassistant/status",
 	}
 	for got, want := range cases {
 		if got != want {
@@ -63,7 +65,8 @@ func TestDiscoveryPayload(t *testing.T) {
 		t.Fatalf("availability %+v %s", p.Availability, p.AvailabilityMode)
 	}
 	wantPlatforms := map[string]string{"lock": "lock", "battery": "sensor", "battery_voltage": "sensor", "wifi_signal": "sensor",
-		"ble_signal": "sensor", "lock_online": "binary_sensor", "state_stale": "binary_sensor", "connection_mode": "sensor", "last_change_reason": "sensor", "event": "event"}
+		"ble_signal": "sensor", "lock_online": "binary_sensor", "state_stale": "binary_sensor", "connection_mode": "sensor", "last_change_reason": "sensor", "event": "event",
+		"last_command": "sensor", "token_expires": "sensor"}
 	if len(p.Components) != len(wantPlatforms) {
 		t.Fatalf("components %v", p.Components)
 	}
@@ -81,6 +84,27 @@ func TestDiscoveryPayload(t *testing.T) {
 	}
 	if p.Components["state_stale"]["entity_category"] != "diagnostic" || p.Components["state_stale"]["device_class"] != "problem" {
 		t.Errorf("state_stale sensor: %v", p.Components["state_stale"])
+	}
+	last := p.Components["last_command"]
+	if last["state_topic"] != "loqed/lock1/command_status" || last["value_template"] != "{{ value_json.status }}" ||
+		last["device_class"] != "enum" || last["entity_category"] != "diagnostic" || last["json_attributes_topic"] != "loqed/lock1/command_status" {
+		t.Errorf("last command sensor: %v", last)
+	}
+	if opts, _ := last["options"].([]any); len(opts) != len(model.CommandStatusValues) || opts[0] != "pending" {
+		t.Errorf("last command options: %v", last["options"])
+	}
+	if te := p.Components["token_expires"]; te["device_class"] != "timestamp" || te["entity_category"] != "diagnostic" ||
+		te["state_topic"] != "loqed/lock1/state" {
+		t.Errorf("token expires sensor: %v", te)
+	}
+	for _, id := range []string{"wifi_signal", "ble_signal"} {
+		if p.Components[id]["unit_of_measurement"] != "%" {
+			t.Errorf("%s must be in %%: %v", id, p.Components[id])
+		}
+	}
+	bleAvail, _ := p.Components["ble_signal"]["availability"].([]any)
+	if len(bleAvail) != 3 || p.Components["ble_signal"]["availability_mode"] != "all" {
+		t.Errorf("BLE sensor must be unavailable at -1: %v", p.Components["ble_signal"])
 	}
 	if p.Components["lock"]["retain"] != nil {
 		t.Errorf("commands must not be retained")

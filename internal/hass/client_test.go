@@ -3,6 +3,7 @@ package hass_test
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,62 @@ func TestRetainedCommandIsIgnored(t *testing.T) {
 	case <-time.After(wait):
 		t.Fatal("live command not delivered")
 	}
+}
+
+func TestRetainedJSONCommandIsIgnored(t *testing.T) {
+	url := testutil.StartBroker(t)
+	pub := testutil.Subscribe(t, url, "unused/#")
+	pub.Publish(t, "loqed/lock1/command", `{"command":"OPEN","id":"x"}`, true)
+	c := startClient(t, url, true)
+	time.Sleep(300 * time.Millisecond)
+	pub.Publish(t, "loqed/lock1/command", `{"command":"LOCK","id":"live"}`, false)
+	select {
+	case cmd := <-c.Commands():
+		if cmd.Command != model.CommandLock || cmd.ID != "live" {
+			t.Fatalf("retained command delivered: %+v", cmd)
+		}
+	case <-time.After(wait):
+		t.Fatal("live command not delivered")
+	}
+}
+
+func TestJSONCommandCarriesID(t *testing.T) {
+	url := testutil.StartBroker(t)
+	c := startClient(t, url, true)
+	sub := testutil.Subscribe(t, url, "unused/#")
+	time.Sleep(200 * time.Millisecond)
+	sub.Publish(t, "loqed/lock1/command", `{"command":"LOCK","id":"`+strings.Repeat("x", 65)+`"}`, false)
+	sub.Publish(t, "loqed/lock1/command", `{"command":"UNLOCK","id":"auto-42"}`, false)
+	select {
+	case cmd := <-c.Commands():
+		if cmd.LockID != "lock1" || cmd.Command != model.CommandUnlock || cmd.ID != "auto-42" {
+			t.Fatalf("got %+v", cmd)
+		}
+	case <-time.After(wait):
+		t.Fatal("no command")
+	}
+}
+
+func TestCommandStatusIsRetainedAndRepublished(t *testing.T) {
+	url := testutil.StartBroker(t)
+	c := startClient(t, url, true)
+	st := model.CommandStatus{Command: model.CommandLock, ID: model.Ptr("abc"), Status: model.StatusSent, Attempts: 1}
+	if err := c.PublishCommandStatus("lock1", st); err != nil {
+		t.Fatal(err)
+	}
+	late := testutil.Subscribe(t, url, "loqed/lock1/command_status")
+	m := late.WaitFor(t, wait, testutil.Topic("loqed/lock1/command_status"))
+	var got model.CommandStatus
+	if err := json.Unmarshal(m.Payload, &got); err != nil || !m.Retained || got.Status != model.StatusSent || *got.ID != "abc" {
+		t.Fatalf("got %s retained=%v err=%v", m.Payload, m.Retained, err)
+	}
+}
+
+func TestRemovedLockCommandStatusIsCleared(t *testing.T) {
+	url := testutil.StartBroker(t)
+	sub := testutil.Subscribe(t, url, "#")
+	startClient(t, url, true)
+	sub.WaitFor(t, wait, func(m testutil.Message) bool { return m.Topic == "loqed/gone/command_status" && len(m.Payload) == 0 })
 }
 
 func TestRedactURL(t *testing.T) {
