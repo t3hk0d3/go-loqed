@@ -87,30 +87,95 @@ func TestApply(t *testing.T) {
 	}
 }
 
-func TestSource(t *testing.T) {
-	cases := map[string]string{
-		"GO_TO_STATE_TWIST_ASSIST_LATCH":     "twist_assist",
-		"GO_TO_STATE_INSTANTOPEN_OPEN":       "instant_open",
-		"GO_TO_STATE_TOUCH_TO_LOCK":          "touch",
-		"GO_TO_STATE_MANUAL_UNLOCK_BLE_OPEN": "manual",
-		"STATE_CHANGED_LATCH_REMOTE":         "remote",
-		"GO_TO_STATE_BLE_LATCH":              "ble",
-		"STATE_CHANGED_NIGHT_LOCK":           "other",
-		"go_to_state_touch_to_lock":          "touch",
+func TestSourceFor(t *testing.T) {
+	key := model.Ptr(3)
+	parsed := map[string]string{
+		"GO_TO_STATE_TWIST_ASSIST_LATCH":            "twist_assist",
+		"GO_TO_STATE_INSTANTOPEN_OPEN":              "instant_open",
+		"GO_TO_STATE_TOUCH_TO_LOCK":                 "touch",
+		"go_to_state_touch_to_lock":                 "touch",
+		"STATE_CHANGED_LATCH_REMOTE":                "remote",
+		"GO_TO_STATE_MANUAL_LOCK_REMOTE_NIGHT_LOCK": "remote",
+		"GO_TO_STATE_MANUAL_UNLOCK_BLE_OPEN":        "other",
+		"STATE_CHANGED_NIGHT_LOCK":                  "other",
 	}
-	for in, want := range cases {
-		if got := model.Source(in); got != want {
+	for in, want := range parsed {
+		if got := model.SourceFor(in, key, false); got != want {
 			t.Errorf("%s: got %s want %s", in, got, want)
+		}
+		if got := model.SourceFor(in, nil, false); got != model.SourceUnknown {
+			t.Errorf("%s without a key: got %s want unknown", in, got)
+		}
+		if got := model.SourceFor(in, nil, true); got != model.SourceUnknown {
+			t.Errorf("%s without a key is never the gateway: got %s", in, got)
+		}
+		if got := model.SourceFor(in, key, true); got != model.SourceGateway {
+			t.Errorf("%s from the gateway: got %s", in, got)
 		}
 	}
 }
 
-func TestNormalizeKeyID(t *testing.T) {
-	if model.NormalizeKeyID(nil) != nil || model.NormalizeKeyID(model.Ptr(255)) != nil {
-		t.Fatal("nil and 255 must normalize to nil")
+func TestParseCommandMessage(t *testing.T) {
+	ok := []struct {
+		in  string
+		cmd model.Command
+		id  string
+	}{
+		{"LOCK", model.CommandLock, ""},
+		{" unlock\n", model.CommandUnlock, ""},
+		{"Open", model.CommandOpen, ""},
+		{`{"command":"UNLOCK","id":"auto-42"}`, model.CommandUnlock, "auto-42"},
+		{` {"command":"lock"} `, model.CommandLock, ""},
+		{`{"command":"OPEN","id":null}`, model.CommandOpen, ""},
+		{`{"command":"LOCK","id":"` + strings.Repeat("x", 64) + `"}`, model.CommandLock, strings.Repeat("x", 64)},
 	}
-	if *model.NormalizeKeyID(model.Ptr(3)) != 3 {
-		t.Fatal("3 stays 3")
+	for _, c := range ok {
+		cmd, id, err := model.ParseCommandMessage([]byte(c.in))
+		if err != nil || cmd != c.cmd || id != c.id {
+			t.Errorf("%q: got %q %q %v", c.in, cmd, id, err)
+		}
+	}
+	bad := []string{
+		"RESET", `{"command":"RESET"}`, `{"command":1}`, `{"command":"LOCK"`, `{"id":"x"}`, `[]`, "",
+		`{"command":"LOCK","id":"` + strings.Repeat("x", 65) + `"}`,
+		`{"command":"LOCK","id":"a\u0007b"}`,
+		`{"command":"LOCK","id":7}`,
+	}
+	for _, in := range bad {
+		_, _, err := model.ParseCommandMessage([]byte(in))
+		if err == nil {
+			t.Errorf("%q: expected error", in)
+		} else if !strings.Contains(err.Error(), "LOCK, UNLOCK or OPEN") {
+			t.Errorf("%q: error does not name the accepted forms: %v", in, err)
+		}
+	}
+}
+
+func TestCommandStatusJSONKeepsNullKeys(t *testing.T) {
+	at := time.Date(2026, 10, 6, 12, 0, 0, 123456789, time.UTC)
+	b, err := json.Marshal(model.CommandStatus{Command: model.CommandLock, Status: model.StatusPending, ReceivedAt: at, UpdatedAt: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"command":"LOCK","id":null,"status":"pending","via":null,"attempts":0,"error":null,` +
+		`"received_at":"2026-10-06T12:00:00.123Z","updated_at":"2026-10-06T12:00:00.123Z"}`
+	if string(b) != want {
+		t.Fatalf("got  %s\nwant %s", b, want)
+	}
+	if len(model.CommandStatusValues) != 8 || model.CommandStatusValues[0] != model.StatusPending {
+		t.Fatalf("statuses %v", model.CommandStatusValues)
+	}
+}
+
+func TestStateTokenExpiryOmittedWhenUnknown(t *testing.T) {
+	b, _ := json.Marshal(model.State{})
+	if strings.Contains(string(b), "token_expires_at") {
+		t.Fatalf("unknown expiry must be omitted: %s", b)
+	}
+	at := time.Date(2027, 4, 5, 19, 15, 26, 0, time.UTC)
+	b, _ = json.Marshal(model.State{TokenExpiresAt: &at})
+	if !strings.Contains(string(b), `"token_expires_at":"2027-04-05T19:15:26Z"`) {
+		t.Fatalf("got %s", b)
 	}
 }
 

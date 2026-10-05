@@ -18,7 +18,7 @@ func reached(eventType string, key *int) BridgeEventMsg {
 }
 
 func goTo(eventType string, target loqed.BoltState) BridgeEventMsg {
-	return BridgeEventMsg{Event: bridge.GoToStateEvent{EventType: eventType, GoToState: target, KeyLocalID: model.Ptr(255)}}
+	return BridgeEventMsg{Event: bridge.GoToStateEvent{EventType: eventType, GoToState: target, KeyLocalID: model.Ptr(3)}}
 }
 
 func TestStartsLocalAndRegistersWebhook(t *testing.T) {
@@ -55,7 +55,7 @@ func TestBridgeEventsUpdateStateAndEmitEvents(t *testing.T) {
 	if h.lock() != "LOCKING" || h.pub.events[0].EventType != model.EventLocking || h.pub.events[0].Source != "touch" {
 		t.Fatalf("lock %s events %+v", h.lock(), h.pub.events)
 	}
-	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(255)))
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", nil)) // the library maps 255 to nil
 	s := h.state()
 	if h.lock() != "LOCKED" || s.BoltState != loqed.BoltNightLock || s.LastEvent != "STATE_CHANGED_NIGHT_LOCK" || s.LastKeyID != nil || s.LastEventAt == nil {
 		t.Fatalf("state %+v", s)

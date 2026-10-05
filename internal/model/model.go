@@ -3,8 +3,12 @@
 package model
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	loqed "github.com/t3hk0d3/go-loqed"
 )
@@ -49,19 +53,74 @@ const (
 
 var EventTypes = []EventType{EventLocked, EventUnlocked, EventOpened, EventLocking, EventUnlocking, EventOpening, EventJammed, EventUnknown, EventCommandFailed}
 
-// SourceGateway marks events produced by the gateway itself.
-const SourceGateway = "gateway"
-
-// Command failure classes published in Event.Error.
+// Event sources the gateway decides itself; the others are parsed from
+// the event type (see SourceFor).
 const (
-	FailExpired      = "expired"      // older than CommandMaxAge before it could be sent
-	FailOffline      = "offline"      // no path to the lock
-	FailUnreachable  = "unreachable"  // not delivered
-	FailNoResponse   = "no_response"  // maybe delivered; outcome being verified
-	FailUnauthorized = "unauthorized" // credentials rejected
-	FailRateLimited  = "rate_limited" // cloud rate limit
-	FailOther        = "failed"
+	SourceGateway = "gateway" // the gateway's own key acting on a gateway command
+	SourceUnknown = "unknown" // no key: a turn by hand or an action of the lock itself
 )
+
+// Command failure classes, published as command_status.error and as the
+// command_failed event's error.
+const (
+	FailUnreachable    = "unreachable"     // never delivered anywhere
+	FailNoResponse     = "no_response"     // maybe delivered; confirmation still runs
+	FailRejected       = "rejected"        // answered with an error
+	FailUnauthorized   = "unauthorized"    // credentials rejected
+	FailKeyDeleted     = "key_deleted"     // the token's lock key was deleted in the LOQED app
+	FailRateLimited    = "rate_limited"    // cloud rate limit
+	FailStalled        = "stalled"         // MOTOR_STALL
+	FailNoConfirmation = "no_confirmation" // no webhook or status showed the target in time
+	FailOffline        = "offline"         // no path to the lock
+	FailExpired        = "expired"         // command_failed only: the deadline passed before sending
+)
+
+// CommandStatusValue is command_status.status.
+type CommandStatusValue string
+
+const (
+	StatusPending    CommandStatusValue = "pending"
+	StatusSending    CommandStatusValue = "sending"
+	StatusSent       CommandStatusValue = "sent"
+	StatusAccepted   CommandStatusValue = "accepted"
+	StatusConfirmed  CommandStatusValue = "confirmed"
+	StatusFailed     CommandStatusValue = "failed"
+	StatusExpired    CommandStatusValue = "expired"
+	StatusSuperseded CommandStatusValue = "superseded"
+)
+
+var CommandStatusValues = []CommandStatusValue{StatusPending, StatusSending, StatusSent, StatusAccepted,
+	StatusConfirmed, StatusFailed, StatusExpired, StatusSuperseded}
+
+// Via is how a command was delivered.
+type Via string
+
+const (
+	ViaLocal Via = "local"
+	ViaCloud Via = "cloud"
+)
+
+// CommandStatus is the retained JSON on <base>/<id>/command_status. Absent
+// values marshal as null so consumers can rely on every key.
+type CommandStatus struct {
+	Command    Command            `json:"command"`
+	ID         *string            `json:"id"`
+	Status     CommandStatusValue `json:"status"`
+	Via        *Via               `json:"via"`
+	Attempts   int                `json:"attempts"`
+	Error      *string            `json:"error"`
+	ReceivedAt time.Time          `json:"received_at"`
+	UpdatedAt  time.Time          `json:"updated_at"`
+}
+
+// MarshalJSON writes times in UTC with millisecond precision.
+func (s CommandStatus) MarshalJSON() ([]byte, error) {
+	type plain CommandStatus
+	p := plain(s)
+	p.ReceivedAt = p.ReceivedAt.UTC().Truncate(time.Millisecond)
+	p.UpdatedAt = p.UpdatedAt.UTC().Truncate(time.Millisecond)
+	return json.Marshal(p)
+}
 
 // State is the retained JSON document on <base>/<id>/state.
 type State struct {
@@ -78,6 +137,7 @@ type State struct {
 	LastKeyName       *string         `json:"last_key_name"`
 	LastEventAt       *time.Time      `json:"last_event_at"`
 	StateStale        bool            `json:"state_stale"`
+	TokenExpiresAt    *time.Time      `json:"token_expires_at,omitempty"`
 }
 
 // Event is the non-retained JSON on <base>/<id>/event.
@@ -105,6 +165,42 @@ func ParseCommand(s string) (Command, bool) {
 	default:
 		return "", false
 	}
+}
+
+// MaxCommandIDLen bounds the client id echoed in command_status.
+const MaxCommandIDLen = 64
+
+var errCommandPayload = errors.New(`use LOCK, UNLOCK or OPEN, or JSON {"command":"LOCK","id":"..."}`)
+
+// ParseCommandMessage accepts a plain LOCK/UNLOCK/OPEN payload or JSON
+// {"command": ..., "id": ...}. An invalid id rejects the whole command so it
+// never runs under a mangled id.
+func ParseCommandMessage(payload []byte) (Command, string, error) {
+	text := strings.TrimSpace(string(payload))
+	if !strings.HasPrefix(text, "{") {
+		if c, ok := ParseCommand(text); ok {
+			return c, "", nil
+		}
+		return "", "", errCommandPayload
+	}
+	var msg struct {
+		Command *string `json:"command"`
+		ID      *string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(text), &msg); err != nil || msg.Command == nil {
+		return "", "", errCommandPayload
+	}
+	c, ok := ParseCommand(*msg.Command)
+	if !ok {
+		return "", "", errCommandPayload
+	}
+	if msg.ID == nil {
+		return c, "", nil
+	}
+	if len(*msg.ID) > MaxCommandIDLen || strings.IndexFunc(*msg.ID, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return "", "", fmt.Errorf("command id must be at most %d printable characters; %w", MaxCommandIDLen, errCommandPayload)
+	}
+	return c, *msg.ID, nil
 }
 
 func (c Command) Target() loqed.BoltState {

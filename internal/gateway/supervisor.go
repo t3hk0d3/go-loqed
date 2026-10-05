@@ -342,7 +342,7 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, c
 		s.lastFreshAt = now
 	}
 	s.lastEventAt = now
-	key := model.NormalizeKeyID(rawKey)
+	key := rawKey
 	name := s.keyName(key, cloudKeyName)
 	at := now.UTC().Truncate(time.Second)
 	s.state.LastEvent, s.state.LastKeyID, s.state.LastKeyName, s.state.LastEventAt = eventType, key, name, &at
@@ -350,7 +350,7 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, c
 		s.lastBridgeEvent = &recentEvent{eventType: strings.ToUpper(eventType), keyID: key, at: now}
 	}
 	s.publish()
-	ev := model.Event{EventType: t.Event, Reason: eventType, Source: model.Source(eventType), KeyLocalID: key, KeyName: name}
+	ev := model.Event{EventType: t.Event, Reason: eventType, Source: model.SourceFor(eventType, key, false), KeyLocalID: key, KeyName: name}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {
 		s.log.Warn("publishing event failed", "err", err)
 	}
@@ -427,6 +427,6 @@ func failClass(err error) string {
 	case errors.Is(err, loqed.ErrRateLimited):
 		return model.FailRateLimited
 	default:
-		return model.FailOther
+		return model.FailRejected
 	}
 }

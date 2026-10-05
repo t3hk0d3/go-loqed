@@ -71,7 +71,7 @@ func (s *Supervisor) enrichFromCloud(now time.Time, e cloud.WebhookEvent) {
 	last := s.lastBridgeEvent
 	if last == nil || e.KeyNameUser == "" || s.state.LastKeyName != nil ||
 		!strings.EqualFold(last.eventType, e.EventType) || now.Sub(last.at) > s.t.EnrichWindow ||
-		!sameKey(last.keyID, model.NormalizeKeyID(e.KeyLocalID)) {
+		!sameKey(last.keyID, e.KeyLocalID) {
 		return
 	}
 	name := e.KeyNameUser
