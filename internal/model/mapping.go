@@ -39,10 +39,15 @@ func LockStateFor(b loqed.BoltState) *LockState {
 	}
 }
 
-// FromStateReached handles STATE_CHANGED_* (incl. *_REMOTE), MOTOR_STALL and
-// other "state reached" events. The bolt state comes from the event type
-// (loqed.ReachedState), never from requested_state.
+// FromStateReached handles STATE_CHANGED_* (incl. *_REMOTE) and MOTOR_STALL.
+// The bolt state comes from the event type (loqed.ReachedState), never from
+// requested_state. Any other event type is unrecognized and leaves the state
+// untouched (EventUnknown only); STATE_CHANGED_UNKNOWN still sets unknown.
 func FromStateReached(eventType string) Transition {
+	et := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(eventType)), "_REMOTE")
+	if !strings.HasPrefix(et, "STATE_CHANGED_") && et != "MOTOR_STALL" {
+		return Transition{Event: EventUnknown}
+	}
 	b, jammed := loqed.ReachedState(eventType)
 	if jammed {
 		return Transition{SetLock: true, Lock: Ptr(Jammed), Event: EventJammed}

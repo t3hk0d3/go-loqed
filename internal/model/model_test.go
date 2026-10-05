@@ -29,7 +29,6 @@ func TestFromStateReached(t *testing.T) {
 		{"STATE_CHANGED_OPEN_REMOTE", "OPEN", loqed.BoltOpen, model.EventOpened},
 		{"STATE_CHANGED_NIGHT_LOCK_REMOTE", "LOCKED", loqed.BoltNightLock, model.EventLocked},
 		{"STATE_CHANGED_UNKNOWN", "<nil>", loqed.BoltUnknown, model.EventUnknown},
-		{"SOMETHING_NEW", "<nil>", loqed.BoltUnknown, model.EventUnknown},
 	}
 	for _, c := range cases {
 		tr := model.FromStateReached(c.eventType)
@@ -40,6 +39,18 @@ func TestFromStateReached(t *testing.T) {
 	stall := model.FromStateReached("MOTOR_STALL")
 	if !stall.SetLock || lockStr(stall.Lock) != "JAMMED" || stall.SetBolt || stall.Event != model.EventJammed {
 		t.Errorf("motor stall: %+v", stall)
+	}
+}
+
+func TestFromStateReachedUnrecognized(t *testing.T) {
+	tr := model.FromStateReached("SOMETHING_NEW")
+	if tr.SetLock || tr.SetBolt || tr.Event != model.EventUnknown {
+		t.Fatalf("%+v", tr)
+	}
+	s := model.State{BoltState: loqed.BoltNightLock, Lock: model.LockStateFor(loqed.BoltNightLock)}
+	s.Apply(tr)
+	if lockStr(s.Lock) != "LOCKED" || s.BoltState != loqed.BoltNightLock {
+		t.Fatalf("unrecognized event wiped state: %+v", s)
 	}
 }
 
