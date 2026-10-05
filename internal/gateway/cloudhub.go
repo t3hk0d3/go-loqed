@@ -19,6 +19,9 @@ type CloudAPI interface {
 type TokenSource interface {
 	Token(ctx context.Context) (string, error)
 	Invalidate(ctx context.Context, rejected string) (string, error)
+	// KeyDeleted reports that token's lock key was deleted in the LOQED app
+	// and returns a replacement (with a new key) for the next request.
+	KeyDeleted(ctx context.Context, token string) (string, error)
 }
 
 const (
@@ -121,6 +124,7 @@ func (h *CloudHub) Locks(ctx context.Context, p Priority, notBefore time.Time) (
 // Command sends a door command. It is never refused by the budget but is
 // recorded in it (pending V2: LOQED may count commands too). A 401 is
 // retried once with a replacement token: a rejected request did nothing.
+// A deleted lock key is never retried.
 func (h *CloudHub) Command(ctx context.Context, lockID string, s loqed.BoltState) error {
 	api, tok, err := h.client(ctx)
 	if err != nil {
@@ -133,6 +137,20 @@ func (h *CloudHub) Command(ctx context.Context, lockID string, s loqed.BoltState
 			return errors.Join(err, rerr)
 		}
 		err = h.command(ctx, api, lockID, s)
+	}
+	if errors.Is(err, cloud.ErrKeyDeleted) {
+		// The cloud answered, so the command is never resent; the next
+		// command uses a token with a working key, if one can be had.
+		h.log.Error("the LOQED cloud refused the command: this token's lock key was deleted in the LOQED app")
+		if tok2, rerr := h.tokens.KeyDeleted(ctx, h.Token()); rerr != nil {
+			h.log.Warn("no replacement token for cloud commands", "err", rerr)
+		} else {
+			h.mu.Lock()
+			if h.token != tok2 {
+				h.token, h.api = tok2, h.newAPI(tok2)
+			}
+			h.mu.Unlock()
+		}
 	}
 	return err
 }

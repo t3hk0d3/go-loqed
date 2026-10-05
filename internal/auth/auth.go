@@ -101,6 +101,9 @@ type Resolver struct {
 	log        *slog.Logger
 
 	mu sync.Mutex
+
+	warnMu         sync.Mutex
+	lastExpiryWarn time.Time
 }
 
 // NewResolver: configured is cloud_token; email is cloud_email; minter is

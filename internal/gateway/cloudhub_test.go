@@ -33,8 +33,11 @@ func (a *scriptedAPI) ListLocks(context.Context) ([]cloud.Lock, error) {
 
 func (a *scriptedAPI) Command(context.Context, string, loqed.BoltState) error {
 	a.commands++
-	if a.token == "old" {
+	switch a.token {
+	case "old":
 		return loqed.ErrUnauthorized
+	case "keyless":
+		return errors.Join(cloud.ErrKeyDeleted, &loqed.APIError{StatusCode: 404})
 	}
 	return nil
 }
@@ -42,12 +45,22 @@ func (a *scriptedAPI) Command(context.Context, string, loqed.BoltState) error {
 type fakeTokens struct {
 	token, next string
 	err         error
+	keyDeleted  []string // tokens reported via KeyDeleted
 }
 
 func (f *fakeTokens) Token(context.Context) (string, error) { return f.token, f.err }
 func (f *fakeTokens) Invalidate(_ context.Context, rejected string) (string, error) {
 	if f.next == "" {
 		return "", loqed.ErrUnauthorized
+	}
+	f.token = f.next
+	return f.next, nil
+}
+
+func (f *fakeTokens) KeyDeleted(_ context.Context, token string) (string, error) {
+	f.keyDeleted = append(f.keyDeleted, token)
+	if f.next == "" {
+		return "", errors.New("no replacement")
 	}
 	f.token = f.next
 	return f.next, nil
@@ -164,5 +177,25 @@ func TestHubCommandDoesNotWaitForReads(t *testing.T) {
 	}
 	if _, err := h.Locks(ctx, PriorityConfirm, time.Time{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("reads wait for the in-flight read, bounded by ctx: %v", err)
+	}
+}
+
+func TestHubCommandDeletedKeyIsNotResent(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	keyless, fresh := &scriptedAPI{}, &scriptedAPI{}
+	tokens := &fakeTokens{token: "keyless", next: "fresh"}
+	h := newHub(&now, tokens, map[string]*scriptedAPI{"keyless": keyless, "fresh": fresh})
+	err := h.Command(context.Background(), "lock1", loqed.BoltOpen)
+	if !errors.Is(err, cloud.ErrKeyDeleted) {
+		t.Fatalf("got %v", err)
+	}
+	if keyless.commands != 1 || fresh.commands != 0 {
+		t.Fatalf("resent: keyless=%d fresh=%d", keyless.commands, fresh.commands)
+	}
+	if len(tokens.keyDeleted) != 1 || tokens.keyDeleted[0] != "keyless" {
+		t.Fatalf("token source not told: %v", tokens.keyDeleted)
+	}
+	if err := h.Command(context.Background(), "lock1", loqed.BoltOpen); err != nil || fresh.commands != 1 {
+		t.Fatalf("next command must use the replacement: %v fresh=%d", err, fresh.commands)
 	}
 }
