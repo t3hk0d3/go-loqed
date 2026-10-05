@@ -63,7 +63,7 @@ func TestDiscoveryPayload(t *testing.T) {
 		t.Fatalf("availability %+v %s", p.Availability, p.AvailabilityMode)
 	}
 	wantPlatforms := map[string]string{"lock": "lock", "battery": "sensor", "battery_voltage": "sensor", "wifi_signal": "sensor",
-		"ble_signal": "sensor", "lock_online": "binary_sensor", "connection_mode": "sensor", "last_change_reason": "sensor", "event": "event"}
+		"ble_signal": "sensor", "lock_online": "binary_sensor", "state_stale": "binary_sensor", "connection_mode": "sensor", "last_change_reason": "sensor", "event": "event"}
 	if len(p.Components) != len(wantPlatforms) {
 		t.Fatalf("components %v", p.Components)
 	}
@@ -75,6 +75,12 @@ func TestDiscoveryPayload(t *testing.T) {
 	}
 	if p.Components["lock"]["command_topic"] != "loqed/lock1/command" || p.Components["event"]["state_topic"] != "loqed/lock1/event" {
 		t.Errorf("topics wrong")
+	}
+	if p.Components["lock"]["json_attributes_topic"] != "loqed/lock1/state" || p.Components["lock"]["json_attributes_template"] == nil {
+		t.Errorf("lock must expose state_stale as attributes: %v", p.Components["lock"])
+	}
+	if p.Components["state_stale"]["entity_category"] != "diagnostic" || p.Components["state_stale"]["device_class"] != "problem" {
+		t.Errorf("state_stale sensor: %v", p.Components["state_stale"])
 	}
 	if p.Components["lock"]["retain"] != nil {
 		t.Errorf("commands must not be retained")

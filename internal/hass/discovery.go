@@ -48,7 +48,10 @@ func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
 			"payload_lock": string(model.CommandLock), "payload_unlock": string(model.CommandUnlock), "payload_open": string(model.CommandOpen),
 			"state_locked": string(model.Locked), "state_unlocked": string(model.Unlocked), "state_open": string(model.Open),
 			"state_locking": string(model.Locking), "state_unlocking": string(model.Unlocking), "state_opening": string(model.Opening),
-			"state_jammed": string(model.Jammed),
+			"state_jammed":          string(model.Jammed),
+			"json_attributes_topic": state,
+			"json_attributes_template": "{{ {'state_stale': value_json.state_stale, 'mode': value_json.mode, " +
+				"'last_event_at': value_json.last_event_at} | tojson }}",
 		},
 		"battery": sensor("battery", "Battery", "battery_percentage",
 			map[string]any{"device_class": "battery", "unit_of_measurement": "%", "state_class": "measurement"}),
@@ -61,6 +64,10 @@ func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
 		"lock_online": map[string]any{
 			"platform": "binary_sensor", "name": "Lock online", "unique_id": uid + "_lock_online", "state_topic": state,
 			"value_template": "{{ 'ON' if value_json.lock_online else 'OFF' }}", "device_class": "connectivity", "entity_category": "diagnostic",
+		},
+		"state_stale": map[string]any{
+			"platform": "binary_sensor", "name": "State stale", "unique_id": uid + "_state_stale", "state_topic": state,
+			"value_template": "{{ 'ON' if value_json.state_stale else 'OFF' }}", "device_class": "problem", "entity_category": "diagnostic",
 		},
 		"connection_mode": sensor("connection_mode", "Connection mode", "mode",
 			map[string]any{"device_class": "enum", "options": []string{"local", "cloud", "offline"}, "entity_category": "diagnostic"}),

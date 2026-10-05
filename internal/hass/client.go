@@ -2,10 +2,12 @@ package hass
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,9 @@ type ClientConfig struct {
 	HAEnabled bool
 	Version   string
 	Now       func() time.Time // clock for command timestamps; nil = time.Now
+	// OnRemovedCleared is called with the ids of removed locks whose retained
+	// topics have been cleared on the broker.
+	OnRemovedCleared func(ids []string)
 }
 
 // Command is a lock command received over MQTT.
@@ -117,15 +122,22 @@ func (c *Client) DisconnectedFor() time.Duration {
 func (c *Client) Commands() <-chan Command { return c.commands }
 
 // SetLocks sets the published locks. removed lists lock ids whose retained
-// topics (discovery, state, availability) must be cleared; it is cleared
-// again on every reconnect until the next SetLocks.
+// topics (discovery, state, availability) must be cleared; removals accumulate
+// across calls and are cleared again on every reconnect until they have been
+// published (see ClientConfig.OnRemovedCleared).
 func (c *Client) SetLocks(locks []LockInfo, removed []string) {
 	c.mu.Lock()
 	c.locks = make(map[string]LockInfo, len(locks))
 	for _, l := range locks {
 		c.locks[TopicID(l.ID)] = l
 	}
-	c.removed = append([]string(nil), removed...)
+	pending := slices.Clone(c.removed)
+	for _, id := range removed {
+		if !slices.Contains(pending, id) {
+			pending = append(pending, id)
+		}
+	}
+	c.removed = slices.DeleteFunc(pending, func(id string) bool { _, ok := c.locks[TopicID(id)]; return ok })
 	for _, id := range removed {
 		delete(c.states, id)
 		delete(c.avail, id)
@@ -193,14 +205,14 @@ func (c *Client) onConnect() {
 	if err := c.publish(t.Status(), true, []byte("online")); err != nil {
 		c.log.Warn("publishing gateway status failed", "err", err)
 	}
-	c.mc.Subscribe(t.CommandWildcard(), 1, c.onCommand)
+	c.waitSubscribe(t.CommandWildcard(), c.mc.Subscribe(t.CommandWildcard(), 1, c.onCommand))
 	if c.cfg.HAEnabled {
-		c.mc.Subscribe(t.HAStatus(), 1, func(_ mqtt.Client, m mqtt.Message) {
+		c.waitSubscribe(t.HAStatus(), c.mc.Subscribe(t.HAStatus(), 1, func(_ mqtt.Client, m mqtt.Message) {
 			if string(m.Payload()) == "online" {
 				c.log.Info("Home Assistant came online; republishing discovery")
 				go c.publishDiscovery()
 			}
-		})
+		}))
 	}
 	c.publishDiscovery()
 	c.retainMu.Lock()
@@ -213,6 +225,15 @@ func (c *Client) onConnect() {
 	}
 	for id, b := range states {
 		_ = c.publish(t.State(TopicID(id)), true, b)
+	}
+}
+
+// waitSubscribe logs a warning if a subscription fails or times out.
+func (c *Client) waitSubscribe(topic string, tok mqtt.Token) {
+	if !tok.WaitTimeout(publishTimeout) {
+		c.log.Warn("MQTT subscription timed out", "topic", topic)
+	} else if err := tok.Error(); err != nil {
+		c.log.Warn("MQTT subscription failed", "topic", topic, "err", err)
 	}
 }
 
@@ -236,11 +257,24 @@ func (c *Client) publishDiscovery() {
 	}
 	removed := append([]string(nil), c.removed...)
 	c.mu.Unlock()
+	var cleared []string
 	for _, id := range removed {
-		_ = c.publish(t.State(TopicID(id)), true, []byte{})
-		_ = c.publish(t.Availability(TopicID(id)), true, []byte{})
+		err := errors.Join(
+			c.publish(t.State(TopicID(id)), true, []byte{}),
+			c.publish(t.Availability(TopicID(id)), true, []byte{}))
 		if c.cfg.HAEnabled {
-			_ = c.publish(t.Discovery(TopicID(id)), true, []byte{})
+			err = errors.Join(err, c.publish(t.Discovery(TopicID(id)), true, []byte{}))
+		}
+		if err == nil && c.mc.IsConnectionOpen() {
+			cleared = append(cleared, id)
+		}
+	}
+	if len(cleared) > 0 {
+		c.mu.Lock()
+		c.removed = slices.DeleteFunc(c.removed, func(id string) bool { return slices.Contains(cleared, id) })
+		c.mu.Unlock()
+		if c.cfg.OnRemovedCleared != nil {
+			c.cfg.OnRemovedCleared(cleared)
 		}
 	}
 	if !c.cfg.HAEnabled {

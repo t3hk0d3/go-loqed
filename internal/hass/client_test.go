@@ -188,3 +188,30 @@ func TestAvailabilityIsDeduplicated(t *testing.T) {
 		t.Fatalf("availability published %d times", n)
 	}
 }
+
+// Removals requested before the broker is reachable must accumulate, and a
+// lock that comes back must not be cleared.
+func TestPendingRemovalsSurviveSecondSetLocks(t *testing.T) {
+	url := testutil.StartBroker(t)
+	sub := testutil.Subscribe(t, url, "#")
+	cleared := make(chan []string, 4)
+	c := hass.NewClient(hass.ClientConfig{URL: url, ClientID: "gw-" + t.Name(), Topics: topics, HAEnabled: true, Version: "test",
+		OnRemovedCleared: func(ids []string) { cleared <- ids }}, slog.New(slog.DiscardHandler))
+	c.SetLocks([]hass.LockInfo{{ID: "lock1", Name: "Front door"}}, []string{"gone1", "back"})
+	c.SetLocks([]hass.LockInfo{{ID: "lock1", Name: "Front door"}, {ID: "back", Name: "Back"}}, []string{"gone2"})
+	c.Start()
+	t.Cleanup(c.Close)
+	for _, id := range []string{"gone1", "gone2"} {
+		sub.WaitFor(t, wait, func(m testutil.Message) bool {
+			return m.Topic == "homeassistant/device/loqed_"+id+"/config" && len(m.Payload) == 0
+		})
+	}
+	select {
+	case ids := <-cleared:
+		if len(ids) != 2 {
+			t.Fatalf("cleared %v", ids)
+		}
+	case <-time.After(wait):
+		t.Fatal("OnRemovedCleared not called")
+	}
+}

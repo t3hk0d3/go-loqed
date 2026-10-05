@@ -81,6 +81,8 @@
     },
     "lock": {
       "command_topic": "loqed/lock1/command",
+      "json_attributes_template": "{{ {'state_stale': value_json.state_stale, 'mode': value_json.mode, 'last_event_at': value_json.last_event_at} | tojson }}",
+      "json_attributes_topic": "loqed/lock1/state",
       "name": null,
       "payload_lock": "LOCK",
       "payload_open": "OPEN",
@@ -106,6 +108,15 @@
       "state_topic": "loqed/lock1/state",
       "unique_id": "loqed_lock1_lock_online",
       "value_template": "{{ 'ON' if value_json.lock_online else 'OFF' }}"
+    },
+    "state_stale": {
+      "device_class": "problem",
+      "entity_category": "diagnostic",
+      "name": "State stale",
+      "platform": "binary_sensor",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_state_stale",
+      "value_template": "{{ 'ON' if value_json.state_stale else 'OFF' }}"
     },
     "wifi_signal": {
       "entity_category": "diagnostic",
