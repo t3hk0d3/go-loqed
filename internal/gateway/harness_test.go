@@ -99,9 +99,15 @@ func (f *fakeCloud) Command(ctx context.Context, _ string, s loqed.BoltState) er
 }
 
 type fakePub struct {
-	states []model.State
-	events []model.Event
-	avail  []bool
+	states   []model.State
+	events   []model.Event
+	avail    []bool
+	statuses []model.CommandStatus
+}
+
+func (f *fakePub) PublishCommandStatus(_ string, s model.CommandStatus) error {
+	f.statuses = append(f.statuses, s)
+	return nil
 }
 
 func (f *fakePub) PublishState(_ string, s model.State) error {

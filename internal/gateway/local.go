@@ -44,7 +44,7 @@ func (s *Supervisor) tryEnterLocal(ctx context.Context) bool {
 	}
 	now := s.d.Now()
 	s.setMode(model.ModeLocal)
-	s.applyStatus(now, st)
+	s.applyStatus(ctx, now, st)
 	s.nextProbe = now.Add(s.t.Liveness)
 	s.nextReconcile = now.Add(s.t.Reconcile)
 	if !s.registerWebhook(ctx) {
@@ -214,7 +214,7 @@ func (s *Supervisor) reconcile(ctx context.Context) bool {
 		return false
 	}
 	s.httpFailures = 0
-	s.applyStatus(now, st)
+	s.applyStatus(ctx, now, st)
 	s.publish()
 	return true
 }
@@ -309,6 +309,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 		s.onReached(now, e.BoltState, e.Jammed)
 		name := s.takeHeld(now, e.EventType, e.KeyLocalID)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, name, model.FromStateReached(e.EventType), feedBridge)
+		s.cmds.onReached(ctx, now, e.BoltState, e.Jammed, e.KeyLocalID)
 	case bridge.GoToStateEvent:
 		if s.isDuplicate(feedBridge, e.EventType, e.KeyLocalID, now) {
 			return
@@ -316,6 +317,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 		s.startMovement(now, e.GoToState)
 		name := s.takeHeld(now, e.EventType, e.KeyLocalID)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, name, model.FromGoTo(e.GoToState, s.state.Lock), feedBridge)
+		s.cmds.onGoTo(now, e.GoToState, e.KeyLocalID)
 		if s.confirmAt.IsZero() {
 			s.awaitConfirm(now, e.GoToState) // STATE_CHANGED may be lost
 		}

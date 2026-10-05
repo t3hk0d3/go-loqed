@@ -162,7 +162,7 @@ func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.T
 			s.bridgeProbeSchedule(now)
 			s.nextCloudProbe, s.nextCloudPoll = now.Add(s.t.Liveness), now.Add(s.t.CloudPoll)
 		}
-		s.applyCloudLock(now, l, list.FetchedAt, p == PriorityConfirm)
+		s.applyCloudLock(ctx, now, l, list.FetchedAt, p == PriorityConfirm)
 		s.publish()
 		return true
 	}
@@ -175,10 +175,14 @@ func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.T
 // online field keeps the previous value. A confirmation poll that still shows
 // the pre-command state (the cloud lags) is published as stale and retried
 // once.
-func (s *Supervisor) applyCloudLock(now time.Time, l cloud.Lock, fetchedAt time.Time, confirming bool) {
+func (s *Supervisor) applyCloudLock(ctx context.Context, now time.Time, l cloud.Lock, fetchedAt time.Time, confirming bool) {
 	if !fetchedAt.Before(s.lastEventAt) {
 		s.state.BoltState = l.BoltState
 		s.state.Lock = model.LockStateFor(l.BoltState)
+		if confirming {
+			final := s.confirmRetried || s.confirmTarget == l.BoltState
+			defer s.cmds.onPoll(ctx, now, l.BoltState, final)
+		}
 		if confirming && s.confirmTarget != loqed.BoltUnknown && s.confirmTarget != l.BoltState {
 			s.state.StateStale = true
 			if !s.confirmRetried {

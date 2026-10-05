@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -128,7 +129,7 @@ func (h *CloudHub) Locks(ctx context.Context, p Priority, notBefore time.Time) (
 func (h *CloudHub) Command(ctx context.Context, lockID string, s loqed.BoltState) error {
 	api, tok, err := h.client(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrNoCloudAccess, err)
 	}
 	err = h.command(ctx, api, lockID, s)
 	if errors.Is(err, loqed.ErrUnauthorized) {

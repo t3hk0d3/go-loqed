@@ -105,8 +105,8 @@ func (m *Manager) DeliverCloudEvent(ev cloud.WebhookEvent) error {
 	return m.deliver(ev.LockID, CloudEventMsg{Event: ev})
 }
 
-func (m *Manager) DeliverCommand(lockID string, c model.Command, at time.Time) error {
-	return m.deliver(lockID, CommandMsg{Command: c, At: at})
+func (m *Manager) DeliverCommand(lockID string, c model.Command, id string, at time.Time) error {
+	return m.deliver(lockID, CommandMsg{Command: c, ID: id, At: at})
 }
 
 func (m *Manager) BridgeKey(lockID string) ([]byte, bool) {

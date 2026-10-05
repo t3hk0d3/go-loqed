@@ -223,7 +223,7 @@ func forwardCommands(ctx context.Context, mq *hass.Client, m *gateway.Manager, l
 		case <-ctx.Done():
 			return
 		case c := <-mq.Commands():
-			if err := m.DeliverCommand(c.LockID, c.Command, c.At); err != nil {
+			if err := m.DeliverCommand(c.LockID, c.Command, c.ID, c.At); err != nil {
 				log.Warn("command not delivered", "lock_id", c.LockID, "err", err)
 			}
 		}

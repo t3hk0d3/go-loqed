@@ -21,13 +21,13 @@ func TestManagerDispatch(t *testing.T) {
 	if err := m.DeliverCloudEvent(cloud.WebhookEvent{LockID: "lock1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.DeliverCommand("lock1", model.CommandLock, h.now); err != nil {
+	if err := m.DeliverCommand("lock1", model.CommandLock, "", h.now); err != nil {
 		t.Fatal(err)
 	}
 	for range 62 { // queue holds 64; 2 already queued
-		_ = m.DeliverCommand("lock1", model.CommandLock, h.now)
+		_ = m.DeliverCommand("lock1", model.CommandLock, "", h.now)
 	}
-	if err := m.DeliverCommand("lock1", model.CommandLock, h.now); !errors.Is(err, ErrBusy) {
+	if err := m.DeliverCommand("lock1", model.CommandLock, "", h.now); !errors.Is(err, ErrBusy) {
 		t.Fatalf("got %v", err)
 	}
 	key, ok := m.BridgeKey("lock1")
@@ -57,7 +57,7 @@ func TestManagerRemoveStopsSupervisor(t *testing.T) {
 	if got := m.Remove([]string{"lock1", "nope"}); len(got) != 1 {
 		t.Fatalf("removed %v", got)
 	}
-	if err := m.DeliverCommand("lock1", model.CommandOpen, time.Now()); !errors.Is(err, ErrUnknownLock) {
+	if err := m.DeliverCommand("lock1", model.CommandOpen, "", time.Now()); !errors.Is(err, ErrUnknownLock) {
 		t.Fatalf("got %v", err)
 	}
 	select {

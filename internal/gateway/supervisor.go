@@ -36,6 +36,7 @@ type Publisher interface {
 	PublishState(lockID string, s model.State) error
 	PublishEvent(lockID string, e model.Event) error
 	PublishAvailability(lockID string, online bool) error
+	PublishCommandStatus(lockID string, s model.CommandStatus) error
 }
 
 type Prober func(ctx context.Context, address string) error
@@ -62,7 +63,8 @@ type BridgeEventMsg struct{ Event bridge.Event }
 type CloudEventMsg struct{ Event cloud.WebhookEvent }
 type CommandMsg struct {
 	Command model.Command
-	At      time.Time // MQTT arrival time; the command expires At+CommandMaxAge
+	ID      string    // optional client id echoed in command_status
+	At      time.Time // MQTT arrival time; deadlines count from here
 }
 
 var errNoBridge = errors.New("gateway: no usable bridge client")
@@ -97,7 +99,11 @@ type Timing struct {
 	DuplicateWindow   time.Duration // same event from the same feed within this is a duplicate
 	AutoLatchWindow   time.Duration // a keyless latch this soon after an open is the automatic latch
 	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
-	CommandMaxAge     time.Duration
+	CommandDeadline   time.Duration // LOCK/UNLOCK: no attempt starts later than this after arrival
+	OpenDeadline      time.Duration // OPEN: same
+	LocalCutoff       time.Duration // LOCK/UNLOCK: local retries stop this long before the deadline
+	OpenLocalCutoff   time.Duration // OPEN: same
+	AlreadyThere      time.Duration // accepted in the target state: confirmed if nothing moves this long
 	EnrichWindow      time.Duration
 	RequestTimeout    time.Duration
 	FailureThreshold  int
@@ -112,7 +118,9 @@ func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 		CloudConfirm: 5 * time.Second, CloudPoll: time.Minute, CloudPollSpacing: pollSpacing,
 		StaleGrace:      10 * time.Minute,
 		DuplicateWindow: 10 * time.Second, AutoLatchWindow: 5 * time.Second, GatewayWindow: time.Minute,
-		CommandMaxAge: 10 * time.Second, EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
+		CommandDeadline: 30 * time.Second, OpenDeadline: 10 * time.Second,
+		LocalCutoff: 10 * time.Second, OpenLocalCutoff: 3 * time.Second, AlreadyThere: 5 * time.Second,
+		EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
 		FailureThreshold: 3,
 	}
 }
@@ -196,10 +204,12 @@ type Supervisor struct {
 	lastCommandSentAt time.Time      // last gateway command written to the bridge or cloud
 
 	warned map[string]*warnState
+
+	cmds commandPipeline
 }
 
 func NewSupervisor(rec store.LockRecord, setting config.LockSetting, d Deps, t Timing) *Supervisor {
-	return &Supervisor{
+	s := &Supervisor{
 		id: rec.ID, d: d, t: t, setting: setting, in: make(chan any, 64),
 		log:    d.Log.With("lock", rec.Name, "lock_id", rec.ID),
 		rec:    ApplySetting(rec, setting),
@@ -207,6 +217,8 @@ func NewSupervisor(rec store.LockRecord, setting config.LockSetting, d Deps, t T
 		state:  model.State{BoltState: loqed.BoltUnknown, Mode: model.ModeOffline},
 		warned: map[string]*warnState{},
 	}
+	s.cmds.s = s
+	return s
 }
 
 func (s *Supervisor) ID() string { return s.id }
@@ -247,12 +259,23 @@ func (s *Supervisor) Run(ctx context.Context) {
 	s.start(ctx)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	// Command retries can be due between ticks (0.5 s backoff).
+	wake := time.NewTimer(time.Hour)
+	wake.Stop()
+	defer wake.Stop()
 	for {
+		if at := s.cmds.nextWake(); !at.IsZero() {
+			wake.Reset(max(at.Sub(s.d.Now()), 0))
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 			s.tick(ctx)
+		case <-wake.C:
+			if ctx.Err() == nil {
+				s.cmds.step(ctx, s.d.Now())
+			}
 		case m := <-s.in:
 			s.handle(ctx, m)
 		}
@@ -284,6 +307,7 @@ func (s *Supervisor) tick(ctx context.Context) {
 	case model.ModeOffline:
 		s.tickOffline(ctx, now)
 	}
+	s.cmds.step(ctx, s.d.Now())
 }
 
 func (s *Supervisor) handle(ctx context.Context, m any) {
@@ -293,7 +317,7 @@ func (s *Supervisor) handle(ctx context.Context, m any) {
 	case CloudEventMsg:
 		s.onCloudEvent(ctx, m.Event)
 	case CommandMsg:
-		s.onCommand(ctx, m)
+		s.cmds.Submit(ctx, s.d.Now(), m.Command, m.ID, m.At)
 	}
 }
 
@@ -440,25 +464,4 @@ func (s *Supervisor) keyName(key *int, cloudName string) *string {
 		return &cloudName
 	}
 	return nil
-}
-
-// failClass maps an error onto a command_failed class.
-func failClass(err error) string {
-	switch {
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		if errors.Is(err, loqed.ErrNoResponse) {
-			return model.FailNoResponse
-		}
-		return model.FailExpired
-	case errors.Is(err, loqed.ErrNoResponse), loqed.IsServerError(err):
-		return model.FailNoResponse
-	case errors.Is(err, loqed.ErrUnreachable), errors.Is(err, errNoBridge):
-		return model.FailUnreachable
-	case errors.Is(err, loqed.ErrUnauthorized):
-		return model.FailUnauthorized
-	case errors.Is(err, loqed.ErrRateLimited):
-		return model.FailRateLimited
-	default:
-		return model.FailRejected
-	}
 }

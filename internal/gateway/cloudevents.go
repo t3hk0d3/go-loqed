@@ -12,7 +12,7 @@ import (
 // onCloudEvent handles a cloud webhook. While the bridge webhook is
 // registered in local mode it only adds a key name to a matching recent
 // bridge event; otherwise it drives state.
-func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
+func (s *Supervisor) onCloudEvent(ctx context.Context, e cloud.WebhookEvent) {
 	now := s.d.Now()
 	s.lastCloudEventAt = now
 	lockEvent := e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState
@@ -49,9 +49,11 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 		}
 		s.onReached(now, e.BoltState, e.Jammed)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType), feedCloud)
+		s.cmds.onReached(ctx, now, e.BoltState, e.Jammed, e.KeyLocalID)
 	case cloud.KindGoToState:
 		s.startMovement(now, e.GoToState)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock), feedCloud)
+		s.cmds.onGoTo(now, e.GoToState, e.KeyLocalID)
 	case cloud.KindSignal:
 		if e.BatteryPercentage != nil && *e.BatteryPercentage >= 0 {
 			s.state.BatteryPercentage = e.BatteryPercentage

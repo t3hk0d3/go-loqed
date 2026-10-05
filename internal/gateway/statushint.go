@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"time"
 
 	loqed "github.com/t3hk0d3/go-loqed"
@@ -23,7 +24,7 @@ func (s *Supervisor) startMovement(now time.Time, target loqed.BoltState) {
 
 // applyStatus applies a successful /status read. Battery and signal always
 // apply; the bolt only as a hint (see applyStatusHint).
-func (s *Supervisor) applyStatus(now time.Time, st *bridge.Status) bool {
+func (s *Supervisor) applyStatus(ctx context.Context, now time.Time, st *bridge.Status) {
 	s.state.BatteryPercentage = model.Ptr(int(st.BatteryPercentage))
 	s.state.BatteryVoltage = model.Ptr(float64(st.BatteryVoltage))
 	s.state.WifiStrength = model.Ptr(int(st.WifiStrength))
@@ -32,7 +33,8 @@ func (s *Supervisor) applyStatus(now time.Time, st *bridge.Status) bool {
 	if st.BoltState == loqed.BoltUnknown {
 		s.lastUnknownCheck = now
 	}
-	return s.applyStatusHint(now, st.BoltState)
+	s.applyStatusHint(now, st.BoltState)
+	s.cmds.onStatus(ctx, now, st.BoltState)
 }
 
 // applyStatusHint applies the /status bolt state only when it cannot undo
