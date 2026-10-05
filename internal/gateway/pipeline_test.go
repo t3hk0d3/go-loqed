@@ -771,3 +771,30 @@ func TestFallbackCommandIsConfirmedViaCloud(t *testing.T) {
 		t.Fatalf("lock %s calls %v %+v", h.lock(), h.cloud.calls, h.lastStatus())
 	}
 }
+
+func TestRejectedCommandIsNotConfirmedByLaterMovement(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.bridge.commandErrs = []error{&loqed.APIError{StatusCode: 400}}
+	h.cmd(model.CommandLock, "")
+	h.advance(10 * time.Second)
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3))) // someone else locks
+	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailRejected {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestUnconfirmedCommandIsConfirmedByLateWebhook(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.bridge.statusErr = loqed.ErrNoResponse
+	h.cmd(model.CommandLock, "")
+	h.run(31 * time.Second)
+	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailNoConfirmation {
+		t.Fatalf("status %+v", st)
+	}
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", ourKey))
+	if st := h.lastStatus(); st.Status != model.StatusConfirmed || st.Error != nil {
+		t.Fatalf("status %+v", st)
+	}
+}

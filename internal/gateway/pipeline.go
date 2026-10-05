@@ -380,11 +380,13 @@ func (p *commandPipeline) onPoll(ctx context.Context, now time.Time, bolt loqed.
 }
 
 // lateConfirm marks the last written command confirmed when its target is
-// reached after it was already reported failed (for example after a
-// timeout on the response).
+// reached after it was reported failed with an unknown outcome (no response,
+// no confirmation in time). A rejected command stays failed: a later move
+// to the same state is someone else's.
 func (p *commandPipeline) lateConfirm(ctx context.Context, now time.Time, bolt loqed.BoltState, jammed bool) {
 	w := p.watch
-	if w == nil || jammed || bolt != w.target() || w.status != model.StatusFailed || now.Sub(w.sentAt) > p.s.t.StatusMoveWindow {
+	if w == nil || jammed || bolt != w.target() || w.status != model.StatusFailed || now.Sub(w.sentAt) > p.s.t.StatusMoveWindow ||
+		(w.errClass != model.FailNoResponse && w.errClass != model.FailNoConfirmation) {
 		return
 	}
 	p.watch = nil
