@@ -9158,6 +9158,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 16: Real-hardware verification (gate for v1.0.0)
 
+> Runs after `2026-10-06-loqed-mqtt-rev-2-1.md` (spec rev 2.1). V1 and V3–V7 already have recorded outcomes in spec 2.5; V2, V8 and V9 remain.
+
 **Files:**
 - Create: `docs/verification.md`
 
