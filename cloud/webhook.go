@@ -17,8 +17,10 @@ const (
 	KindOnline
 )
 
-// WebhookEvent is a decoded cloud webhook. Account e-mail, account name and
-// admin key name are intentionally not decoded.
+// WebhookEvent is a decoded cloud webhook. Account e-mail, account name,
+// admin key name and the IFTTT fields value1..value3 (which repeat the key
+// name and the account e-mail) are intentionally not decoded. LockID is the
+// cloud's numeric internal id, not the Lock API id.
 type WebhookEvent struct {
 	Kind              WebhookKind
 	LockID            string
@@ -40,7 +42,7 @@ type rawWebhook struct {
 	EventType         *string       `json:"event_type"`
 	RequestedState    *loqed.String `json:"requested_state"`
 	GoToState         *loqed.String `json:"go_to_state"`
-	KeyLocalID        *loqed.Int    `json:"key_local_id"`
+	KeyLocalID        *loqed.KeyID  `json:"key_local_id"`
 	KeyNameUser       loqed.String  `json:"key_name_user"`
 	BatteryPercentage *loqed.Int    `json:"battery_percentage"`
 	WifiStrength      *loqed.Int    `json:"wifi_strength"`
@@ -59,10 +61,8 @@ func ParseWebhook(body []byte) (WebhookEvent, error) {
 		return WebhookEvent{}, fmt.Errorf("%w: cloud webhook without lock_id", loqed.ErrInvalidPayload)
 	}
 	ev := WebhookEvent{LockID: string(r.LockID), KeyNameUser: string(r.KeyNameUser),
+		KeyLocalID:        r.KeyLocalID.Ptr(),
 		BatteryPercentage: intPtr(r.BatteryPercentage), WifiStrength: intPtr(r.WifiStrength), BLEStrength: intPtr(r.BLEStrength)}
-	if r.KeyLocalID != nil && *r.KeyLocalID >= 0 && *r.KeyLocalID <= 255 {
-		ev.KeyLocalID = intPtr(r.KeyLocalID)
-	}
 	switch {
 	case r.EventType != nil && loqed.IsGoToState(*r.EventType):
 		goTo := ""

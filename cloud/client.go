@@ -161,7 +161,12 @@ func (c *Client) ListLocks(ctx context.Context) ([]Lock, error) {
 	return locks, nil
 }
 
-// Command moves the bolt to open, day_lock or night_lock.
+// ErrKeyDeleted: the token's own lock key was deleted in the LOQED app, so
+// the cloud cannot actuate the lock with this token (reads still work).
+var ErrKeyDeleted = errors.New("cloud: this token's lock key was deleted in the LOQED app")
+
+// Command moves the bolt to open, day_lock or night_lock. The cloud acts
+// with the token's own lock key.
 func (c *Client) Command(ctx context.Context, lockID string, s loqed.BoltState) error {
 	switch s {
 	case loqed.BoltOpen, loqed.BoltDayLock, loqed.BoltNightLock:
@@ -169,6 +174,10 @@ func (c *Client) Command(ctx context.Context, lockID string, s loqed.BoltState) 
 		return fmt.Errorf("cloud: unsupported bolt state %q", s)
 	}
 	_, err := c.get(ctx, "/api/locks/"+url.PathEscape(lockID)+"/bolt_state/"+string(s))
+	var apiErr *loqed.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && strings.Contains(apiErr.Body, "No query results") && strings.Contains(apiErr.Body, "ApiKey]") {
+		return errors.Join(ErrKeyDeleted, err)
+	}
 	return err
 }
 

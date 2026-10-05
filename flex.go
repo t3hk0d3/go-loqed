@@ -107,3 +107,36 @@ func scalarText(b []byte) (text string, null bool, err error) {
 		return string(b), false, nil
 	}
 }
+
+// KeyID decodes key_local_id. Only 0..254 (number or numeric string) is a
+// real key; 255, "", null, absent, non-numeric or out-of-range values all
+// mean "no key" (a turn by hand or an action of the lock itself) and never
+// reject the event.
+type KeyID struct {
+	id    int
+	valid bool
+}
+
+func (k *KeyID) UnmarshalJSON(b []byte) error {
+	s, null, err := scalarText(b)
+	if err != nil {
+		return err
+	}
+	*k = KeyID{}
+	if null {
+		return nil
+	}
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n <= 254 {
+		*k = KeyID{id: n, valid: true}
+	}
+	return nil
+}
+
+// Ptr returns the key id, or nil when there is no key (also for a nil k).
+func (k *KeyID) Ptr() *int {
+	if k == nil || !k.valid {
+		return nil
+	}
+	id := k.id
+	return &id
+}

@@ -70,3 +70,41 @@ func TestFloatBoolString(t *testing.T) {
 		t.Fatalf("unexpected decode: %+v", got)
 	}
 }
+
+func TestKeyIDOnlyRealKeys(t *testing.T) {
+	// 255 and "" are what the bridge and the cloud send when no key acted.
+	intp := func(v int) *int { return &v }
+	cases := map[string]*int{
+		`0`: intp(0), `"0"`: intp(0), `7`: intp(7), `"7"`: intp(7), `254`: intp(254),
+		`255`: nil, `"255"`: nil, `""`: nil, `null`: nil, `-1`: nil, `999`: nil, `"abc"`: nil, `1.5`: nil,
+	}
+	for in, want := range cases {
+		var got struct {
+			K *loqed.KeyID `json:"k"`
+		}
+		if err := json.Unmarshal([]byte(`{"k":`+in+`}`), &got); err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		p := got.K.Ptr()
+		if (p == nil) != (want == nil) || (p != nil && *p != *want) {
+			t.Errorf("%s: got %v want %v", in, p, want)
+		}
+	}
+	var absent struct {
+		K *loqed.KeyID `json:"k"`
+	}
+	if err := json.Unmarshal([]byte(`{}`), &absent); err != nil || absent.K.Ptr() != nil {
+		t.Fatalf("absent: %v %v", absent.K.Ptr(), err)
+	}
+}
+
+func TestKeyIDRejectsObjects(t *testing.T) {
+	var got struct {
+		K loqed.KeyID `json:"k"`
+	}
+	for _, in := range []string{`{}`, `[]`} {
+		if err := json.Unmarshal([]byte(`{"k":`+in+`}`), &got); err == nil {
+			t.Errorf("%s: expected error", in)
+		}
+	}
+}

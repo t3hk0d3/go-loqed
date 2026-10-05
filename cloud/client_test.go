@@ -143,6 +143,40 @@ func TestCommand(t *testing.T) {
 	}
 }
 
+func TestCommandDeletedKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		deleted bool
+	}{
+		{"api key gone", `{"message":"No query results for model [App\\Models\\ApiKey]."}`, true},
+		{"other 404", `{"message":"No query results for model [App\\Models\\Lock]."}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cl := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(c.body))
+			})
+			err := cl.Command(context.Background(), "x", loqed.BoltNightLock)
+			var apiErr *loqed.APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+				t.Fatalf("expected the 404 APIError, got %v", err)
+			}
+			if errors.Is(err, cloud.ErrKeyDeleted) != c.deleted {
+				t.Fatalf("ErrKeyDeleted = %v, want %v (%v)", !c.deleted, c.deleted, err)
+			}
+		})
+	}
+}
+
+func TestCommandNoContentIsSuccess(t *testing.T) {
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	if err := c.Command(context.Background(), "x", loqed.BoltDayLock); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCommandFollowedRedirectToLoginIsUnauthorized(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/login" {

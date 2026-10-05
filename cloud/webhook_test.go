@@ -16,6 +16,11 @@ const (
 	cloudGoTo   = `{"go_to_state":"OPEN","event_type":"GO_TO_STATE_INSTANTOPEN_OPEN","lock_id":"Yq1g","key_local_id":"3","key_name_user":"Front door"}`
 	cloudSignal = `{"ble_strength":42,"wifi_strength":73,"battery_percentage":88,"lock_id":"Yq1g"}`
 	cloudOnline = `{"online":1,"lock_id":"Yq1g"}`
+	// As observed on 2026-10-05 (personal values replaced).
+	cloudObserved = `{"event_type":"STATE_CHANGED_NIGHT_LOCK","requested_state":"NIGHT_LOCK","lock_id":6148,"key_local_id":"1",
+		"key_name_user":"Gateway","key_name_admin":"Jane Doe","key_account_email":"jane@example.com","key_account_name":"Jane Doe",
+		"value1":"STATE_CHANGED_NIGHT_LOCK","value2":"Jane's phone","value3":"jane@example.com"}`
+	cloudNoKey = `{"event_type":"STATE_CHANGED_LATCH","requested_state":"DAY_LOCK","lock_id":"6148","key_local_id":"","key_name_user":""}`
 )
 
 func TestParseWebhookStateReached(t *testing.T) {
@@ -39,6 +44,32 @@ func TestParseWebhookNeverExposesPersonalData(t *testing.T) {
 		if contains(dump, leak) {
 			t.Fatalf("event exposes %q: %s", leak, dump)
 		}
+	}
+}
+
+func TestParseWebhookObservedPayload(t *testing.T) {
+	ev, err := cloud.ParseWebhook([]byte(cloudObserved))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.LockID != "6148" || ev.KeyLocalID == nil || *ev.KeyLocalID != 1 || ev.BoltState != loqed.BoltNightLock {
+		t.Fatalf("%+v", ev)
+	}
+	dump := fmt.Sprintf("%+v", ev)
+	for _, leak := range []string{"jane@example.com", "Jane Doe", "Jane's phone"} {
+		if contains(dump, leak) {
+			t.Fatalf("event exposes %q: %s", leak, dump)
+		}
+	}
+}
+
+func TestParseWebhookEmptyKeyIsNoKey(t *testing.T) {
+	ev, err := cloud.ParseWebhook([]byte(cloudNoKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.KeyLocalID != nil {
+		t.Fatalf("expected no key, got %d", *ev.KeyLocalID)
 	}
 }
 

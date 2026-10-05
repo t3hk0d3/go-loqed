@@ -65,7 +65,7 @@ type rawEvent struct {
 	EventType         *string       `json:"event_type"`
 	RequestedState    *loqed.String `json:"requested_state"`
 	GoToState         *loqed.String `json:"go_to_state"`
-	KeyLocalID        *loqed.Int    `json:"key_local_id"`
+	KeyLocalID        *loqed.KeyID  `json:"key_local_id"`
 	BatteryType       *loqed.String `json:"battery_type"`
 	BatteryPercentage *loqed.Int    `json:"battery_percentage"`
 	WifiStrength      *loqed.Int    `json:"wifi_strength"`
@@ -105,7 +105,7 @@ func classify(r rawEvent) (Event, error) {
 			goTo = string(*r.GoToState)
 		}
 		return GoToStateEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, EventType: *r.EventType,
-			GoToState: loqed.GoToTarget(*r.EventType, goTo), KeyLocalID: keyID(r.KeyLocalID)}, nil
+			GoToState: loqed.GoToTarget(*r.EventType, goTo), KeyLocalID: r.KeyLocalID.Ptr()}, nil
 	case r.EventType != nil:
 		requested := ""
 		if r.RequestedState != nil {
@@ -114,7 +114,7 @@ func classify(r rawEvent) (Event, error) {
 		state, jammed := loqed.ReachedState(*r.EventType)
 		return StateReachedEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, EventType: *r.EventType,
 			BoltState: state, Jammed: jammed, RequestedState: loqed.ParseBoltState(requested),
-			KeyLocalID: keyID(r.KeyLocalID)}, nil
+			KeyLocalID: r.KeyLocalID.Ptr()}, nil
 	case r.BatteryPercentage != nil:
 		ev := BatteryEvent{MacWifi: r.MacWifi, MacBLE: r.MacBLE, BatteryPercentage: int(*r.BatteryPercentage),
 			WifiStrength: intPtr(r.WifiStrength), BLEStrength: intPtr(r.BLEStrength)}
@@ -128,14 +128,6 @@ func classify(r rawEvent) (Event, error) {
 	default:
 		return nil, fmt.Errorf("%w: unrecognized webhook body", loqed.ErrInvalidPayload)
 	}
-}
-
-func keyID(v *loqed.Int) *int {
-	if v == nil || *v < 0 || *v > 255 {
-		return nil
-	}
-	id := int(*v)
-	return &id
 }
 
 func intPtr(v *loqed.Int) *int {

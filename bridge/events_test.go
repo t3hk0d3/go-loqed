@@ -33,7 +33,7 @@ func TestParseEventGoldenStateReached(t *testing.T) {
 		t.Fatalf("got %T", ev)
 	}
 	if sr.EventType != "STATE_CHANGED_NIGHT_LOCK" || sr.BoltState != loqed.BoltNightLock || sr.Jammed ||
-		sr.KeyLocalID == nil || *sr.KeyLocalID != 255 || sr.MacWifi != "aa" || sr.MacBLE != "bb" {
+		sr.KeyLocalID != nil || sr.MacWifi != "aa" || sr.MacBLE != "bb" {
 		t.Fatalf("got %+v", sr)
 	}
 }
@@ -126,7 +126,7 @@ func TestParseEventFamilies(t *testing.T) {
 		{"go to state without go_to_state field", `{"event_type":"GO_TO_STATE_TOUCH_TO_LOCK","key_local_id":255}`,
 			func(t *testing.T, ev bridge.Event) {
 				g := ev.(bridge.GoToStateEvent)
-				if g.GoToState != loqed.BoltNightLock || *g.KeyLocalID != 255 {
+				if g.GoToState != loqed.BoltNightLock || g.KeyLocalID != nil {
 					t.Fatalf("%+v", g)
 				}
 			}},
@@ -142,6 +142,24 @@ func TestParseEventFamilies(t *testing.T) {
 				o := ev.(bridge.OnlineEvent)
 				if *o.WifiStrength != -60 || *o.BLEStrength != -1 {
 					t.Fatalf("%+v", o)
+				}
+			}},
+		{"empty key means no key", `{"requested_state":"DAY_LOCK","event_type":"STATE_CHANGED_LATCH","key_local_id":""}`,
+			func(t *testing.T, ev bridge.Event) {
+				if ev.(bridge.StateReachedEvent).KeyLocalID != nil {
+					t.Fatal("expected nil key")
+				}
+			}},
+		{"absent key means no key", `{"event_type":"GO_TO_STATE_MANUAL_LOCK_REMOTE_LATCH"}`,
+			func(t *testing.T, ev bridge.Event) {
+				if ev.(bridge.GoToStateEvent).KeyLocalID != nil {
+					t.Fatal("expected nil key")
+				}
+			}},
+		{"key 0 is a real key", `{"event_type":"STATE_CHANGED_LATCH","key_local_id":"0"}`,
+			func(t *testing.T, ev bridge.Event) {
+				if k := ev.(bridge.StateReachedEvent).KeyLocalID; k == nil || *k != 0 {
+					t.Fatalf("got %v", k)
 				}
 			}},
 		{"out of range key", `{"requested_state":"OPEN","event_type":"STATE_CHANGED_OPEN","key_local_id":999}`,
