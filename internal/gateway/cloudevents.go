@@ -27,7 +27,13 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 	if s.mode == model.ModeCloud {
 		// Push works: drop to the reconcile cadence, counted from the last
 		// successful poll (so events never postpone it).
-		s.nextCloudPoll = s.nextPollTime(now)
+		// An event may pull the poll out to the reconcile cadence, never
+		// push a due poll further away.
+		if !s.lastPollAt.IsZero() {
+			if r := s.lastPollAt.Add(s.t.Reconcile); r.After(now) && r.After(s.nextCloudPoll) {
+				s.nextCloudPoll = r
+			}
+		}
 	}
 	switch e.Kind {
 	case cloud.KindStateReached:

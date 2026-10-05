@@ -38,7 +38,7 @@ func NewManager(sups []*Supervisor) *Manager {
 	return m
 }
 
-// Run runs every supervisor until ctx is cancelled.
+// Run runs every supervisor until ctx is cancelled. Run must be called once.
 func (m *Manager) Run(ctx context.Context) {
 	m.mu.Lock()
 	for _, r := range m.sups {

@@ -133,3 +133,21 @@ func TestConfiguredKeyNameBeatsCloudName(t *testing.T) {
 		t.Fatalf("state %+v", h.state())
 	}
 }
+
+// Cloud events arriving more often than the poll must not push a due
+// reconcile poll further out.
+func TestCloudEventsNeverPostponeDuePoll(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{}, func(d *Deps) { d.CloudWebhooks = true })
+	h.start()
+	h.toCloud()
+	h.send(cloudReached(""))
+	h.advance(h.s.lastPollAt.Add(h.s.t.Reconcile).Add(-time.Minute).Sub(h.now))
+	polls := len(h.cloud.calls)
+	for range 4 { // every 30 s for 2 min
+		h.send(cloudReached(""))
+		h.advance(30 * time.Second)
+	}
+	if len(h.cloud.calls) <= polls {
+		t.Fatal("the due reconcile poll was postponed by cloud events")
+	}
+}

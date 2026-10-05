@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func (a *lockAPI) Command(_ context.Context, _ string, s loqed.BoltState) error 
 }
 
 // realCloud wires the harness to a real CloudHub, Budget and Refresher.
-func realCloud(t *testing.T, h *harness, api *lockAPI) (*CloudHub, *Refresher) {
+func realCloud(t *testing.T, h *harness, api *lockAPI) (*CloudHub, *Refresher, *int) {
 	t.Helper()
 	clock := func() time.Time { return h.now }
 	hub := NewCloudHub(NewBudget(10, 12*time.Hour, clock, store.BudgetState{}, nil), &fakeTokens{token: "tok"},
@@ -40,8 +41,15 @@ func realCloud(t *testing.T, h *harness, api *lockAPI) (*CloudHub, *Refresher) {
 	st := newStore(t)
 	ref := NewRefresher(hub, st, clock)
 	h.s.d.Cloud = hub
-	h.s.d.Refresh = ref.Refresh
-	return hub, ref
+	reached := new(int) // refreshes that were not throttled, i.e. reached the cloud
+	h.s.d.Refresh = func(ctx context.Context, id string, r Reason) (store.LockRecord, error) {
+		rec, err := ref.Refresh(ctx, id, r)
+		if !errors.Is(err, ErrRefreshThrottled) {
+			*reached++
+		}
+		return rec, err
+	}
+	return hub, ref, reached
 }
 
 // UNLOCK in cloud mode: the confirmation poll 5 s later must not be
@@ -49,7 +57,7 @@ func realCloud(t *testing.T, h *harness, api *lockAPI) (*CloudHub, *Refresher) {
 func TestRealHubConfirmShowsCommandResult(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	api := &lockAPI{bolt: loqed.BoltNightLock}
-	realCloud(t, h, api)
+	_, _, _ = realCloud(t, h, api)
 	h.start()
 	h.toCloud()
 	if h.lock() != "LOCKED" {
@@ -68,7 +76,7 @@ func TestRealHubConfirmShowsCommandResult(t *testing.T) {
 func TestRealHubFlappingBridgeKeepsBudget(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	api := &lockAPI{bolt: loqed.BoltNightLock}
-	hub, _ := realCloud(t, h, api)
+	hub, _, reached := realCloud(t, h, api)
 	h.start()
 	for range 48 { // 12 h: 3 min down, 12 min up
 		h.probeErr = loqed.ErrUnreachable
@@ -82,6 +90,9 @@ func TestRealHubFlappingBridgeKeepsBudget(t *testing.T) {
 	}
 	if hub.Budget().Remaining() < 1 {
 		t.Fatalf("budget drained by a flapping bridge: %d reads", api.reads)
+	}
+	if *reached > 8 {
+		t.Fatalf("%d refreshes reached the cloud in 12h of flapping; backoff is not working", *reached)
 	}
 	if api.reads > 10 {
 		t.Fatalf("%d reads in 12h exceed the budget", api.reads)
