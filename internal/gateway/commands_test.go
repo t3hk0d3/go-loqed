@@ -222,3 +222,35 @@ func TestCommandWithUnusableRefreshUsesCloudWithoutPanic(t *testing.T) {
 		t.Fatalf("the command must still go out via the cloud: %v", h.cloud.commands)
 	}
 }
+
+// The failure that trips failover must not lose the confirmation of a
+// command that may have run.
+func TestUncertainCommandOnFailoverIsStillConfirmed(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.s.httpFailures = 2
+	h.bridge.commandErrs = []error{loqed.ErrNoResponse}
+	h.command(model.CommandOpen)
+	if h.s.mode != model.ModeCloud || len(h.cloud.commands) != 0 {
+		t.Fatalf("mode %s cloud commands %v", h.s.mode, h.cloud.commands)
+	}
+	calls := len(h.cloud.calls)
+	h.run(6 * time.Second)
+	if !slices.Contains(h.cloud.calls[calls:], PriorityConfirm) {
+		t.Fatalf("no confirm poll: %v", h.cloud.calls[calls:])
+	}
+}
+
+func TestCommandExpiringDuringBridgeAttemptIsNotSentViaCloud(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.bridge.commandErrs = []error{loqed.ErrUnreachable}
+	h.bridge.onCommand = func() { time.Sleep(100 * time.Millisecond) }
+	h.send(CommandMsg{Command: model.CommandOpen, At: h.now.Add(-10*time.Second + 50*time.Millisecond)})
+	if len(h.cloud.commands) != 0 {
+		t.Fatalf("late cloud send: %v", h.cloud.commands)
+	}
+	if got := h.failedCommands(); !slices.Equal(got, []string{model.FailExpired}) {
+		t.Fatalf("command_failed %v", got)
+	}
+}

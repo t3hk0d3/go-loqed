@@ -20,6 +20,7 @@ type fakeBridge struct {
 	statusCalls int
 	commandErrs []error // consumed per call; empty = success
 	commands    []bridge.Action
+	onCommand   func() // optional hook run inside Command
 	hooks       []bridge.Webhook
 	listErr     error
 	listCalls   int
@@ -38,6 +39,9 @@ func (f *fakeBridge) Status(context.Context) (*bridge.Status, error) {
 
 func (f *fakeBridge) Command(_ context.Context, a bridge.Action) error {
 	f.commands = append(f.commands, a)
+	if f.onCommand != nil {
+		f.onCommand()
+	}
 	if len(f.commandErrs) > 0 {
 		err := f.commandErrs[0]
 		f.commandErrs = f.commandErrs[1:]

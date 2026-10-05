@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/bridge"
@@ -29,7 +30,7 @@ func (s *Supervisor) onCommand(ctx context.Context, m CommandMsg) {
 	now := s.d.Now()
 	deadline := m.At.Add(s.t.CommandMaxAge)
 	if !now.Before(deadline) {
-		s.commandFailed(m.Command, model.FailExpired, errors.New("command older than 10s when dequeued"))
+		s.commandFailed(m.Command, model.FailExpired, fmt.Errorf("command older than %s when dequeued", s.t.CommandMaxAge))
 		return
 	}
 	// The deadline is computed on the supervisor clock; contexts expire on
@@ -74,6 +75,11 @@ func (s *Supervisor) sendViaBridge(ctx, cctx context.Context, c model.Command) {
 		s.awaitConfirm(now, c.Target())
 		s.confirmAt, s.confirmViaCloud = now, true
 		s.httpFailure(ctx, err)
+		if s.mode != model.ModeLocal {
+			// Failover cleared the pending confirmation; the uncertain
+			// command must still be verified.
+			s.scheduleCloudConfirm(s.d.Now(), c.Target())
+		}
 	}
 }
 
