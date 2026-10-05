@@ -300,3 +300,73 @@ func TestCancelDuringStartupIsCleanExit(t *testing.T) {
 		t.Fatalf("a stop during startup must be a clean exit: %v", err)
 	}
 }
+
+// A cache holding no locks must not stick: the next start asks the cloud.
+func TestEmptyLockCacheIsRefreshedOnNextStart(t *testing.T) {
+	broker := testutil.StartBroker(t)
+	fb := &fakeBridge{bolt: "day_lock"}
+	bridgeSrv := httptest.NewServer(fb)
+	defer bridgeSrv.Close()
+	var calls atomic.Int32
+	full := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	var empty atomic.Bool
+	empty.Store(true)
+	cloudSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if empty.Load() {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		full.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer cloudSrv.Close()
+	cfg := baseConfig(filepath.Join(t.TempDir(), "locks.json"), broker)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run(context.Background(), app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler), CloudBaseURL: cloudSrv.URL})
+	if err == nil || !strings.Contains(err.Error(), "no locks to manage") {
+		t.Fatalf("got %v", err)
+	}
+	empty.Store(false)
+	start(t, cfg, cloudSrv.URL) // fails the test if the app exits instead of starting
+}
+
+// A removed lock stays in published_ids until its retained topics have
+// really been cleared (the broker may be down when the lock disappears).
+func TestRemovedIDsStayPublishedUntilCleared(t *testing.T) {
+	broker := testutil.StartBroker(t)
+	fb := &fakeBridge{bolt: "day_lock"}
+	bridgeSrv := httptest.NewServer(fb)
+	defer bridgeSrv.Close()
+	var calls atomic.Int32
+	cloudSrv := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	cachePath := filepath.Join(t.TempDir(), "locks.json")
+	cfg := baseConfig(cachePath, broker)
+	_, stop := start(t, cfg, cloudSrv.URL)
+	stop()
+
+	st, _, _ := store.Open(cachePath)
+	if err := st.Update(func(c *store.Cache) { c.PublishedIDs = []string{"lock1", "ghost"} }); err != nil {
+		t.Fatal(err)
+	}
+	published := func() []string {
+		s, _, _ := store.Open(cachePath)
+		return s.Snapshot().PublishedIDs
+	}
+
+	down := cfg
+	down.MQTT.URL = "tcp://127.0.0.1:1" // broker unreachable: nothing can be cleared
+	_, stop = start(t, down, cloudSrv.URL)
+	stop()
+	if got := published(); len(got) != 2 {
+		t.Fatalf("ghost dropped from published_ids before it was cleared: %v", got)
+	}
+
+	sub := testutil.Subscribe(t, broker, "#")
+	cfg.MQTT.ClientID = "gw-cleared"
+	start(t, cfg, cloudSrv.URL)
+	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
+		return m.Topic == "loqed/ghost/state" && len(m.Payload) == 0
+	})
+	eventually(t, "published_ids without the cleared lock", func() bool { return len(published()) == 1 })
+}

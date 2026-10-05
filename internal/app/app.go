@@ -123,14 +123,20 @@ func Run(ctx context.Context, o Options) error {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
+	published := newPublished(selected)
+	removed := removedIDs(before, selected)
+	published.addPending(removed)
 	mq := hass.NewClient(hass.ClientConfig{
 		URL: cfg.MQTT.URL, Username: cfg.MQTT.Username, Password: cfg.MQTT.Password, ClientID: cfg.MQTT.ClientID,
 		Topics:    hass.Topics{Base: cfg.MQTT.BaseTopic, DiscoveryPrefix: cfg.HomeAssistant.DiscoveryPrefix},
 		HAEnabled: cfg.HomeAssistant.Enabled, Version: o.Version, Now: now,
+		OnRemovedCleared: func(ids []string) {
+			published.clearPending(ids)
+			savePublished(st, published.persistIDs(), log)
+		},
 	}, log)
-	published := newPublished(selected)
-	mq.SetLocks(published.infos(), removedIDs(before, selected))
-	savePublished(st, published.ids(), log)
+	mq.SetLocks(published.infos(), removed)
+	savePublished(st, published.persistIDs(), log)
 	mq.Start()
 	defer mq.Close()
 
@@ -173,7 +179,7 @@ func Run(ctx context.Context, o Options) error {
 			}
 			log.Info("locks were removed from the account", "lock_ids", gone)
 			mq.SetLocks(published.remove(gone), gone)
-			savePublished(st, published.ids(), log)
+			savePublished(st, published.persistIDs(), log)
 		}()
 	}
 
@@ -260,6 +266,7 @@ func initialRefresh(ctx context.Context, cfg config.Config, st *store.Store, sta
 	age := now().Sub(snap.FetchedAt)
 	need := status != store.StatusLoaded ||
 		snap.TokenSHA256 != store.TokenHash(tok) ||
+		len(snap.Locks) == 0 ||
 		(missingFromCache(snap, cfg.Locks) && age > missingLockRefreshAge) ||
 		(cfg.CacheMaxAge > 0 && age > cfg.CacheMaxAge.D())
 	if !need {
@@ -313,9 +320,12 @@ func removedIDs(before store.Cache, selected []store.LockRecord) []string {
 }
 
 // published tracks the locks currently exposed over MQTT.
+// pending holds removed ids whose retained topics are not yet known to be
+// cleared; they stay in published_ids so a restart still clears them.
 type published struct {
-	mu    sync.Mutex
-	locks []hass.LockInfo
+	mu      sync.Mutex
+	locks   []hass.LockInfo
+	pending []string
 }
 
 func newPublished(recs []store.LockRecord) *published {
@@ -332,17 +342,35 @@ func (p *published) infos() []hass.LockInfo {
 	return slices.Clone(p.locks)
 }
 
-func (p *published) ids() []string {
+// persistIDs lists the published locks plus removed ones not yet cleared.
+func (p *published) persistIDs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]string, 0, len(p.locks))
+	out := make([]string, 0, len(p.locks)+len(p.pending))
 	for _, l := range p.locks {
 		out = append(out, l.ID)
 	}
-	return out
+	return append(out, p.pending...)
+}
+
+func (p *published) addPending(ids []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, id := range ids {
+		if !slices.Contains(p.pending, id) {
+			p.pending = append(p.pending, id)
+		}
+	}
+}
+
+func (p *published) clearPending(ids []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pending = slices.DeleteFunc(p.pending, func(id string) bool { return slices.Contains(ids, id) })
 }
 
 func (p *published) remove(ids []string) []hass.LockInfo {
+	p.addPending(ids)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.locks = slices.DeleteFunc(p.locks, func(l hass.LockInfo) bool { return slices.Contains(ids, l.ID) })
