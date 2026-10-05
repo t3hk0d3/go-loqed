@@ -92,8 +92,16 @@ func (f *fakePortal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.render(w, sid, inertia, "Auth/Login", map[string]any{"errors": errs})
 	case r.URL.Path == "/login" && r.Method == http.MethodPost:
-		var body struct{ Email, Password string }
+		var body struct {
+			Email, Password string
+			Remember        any
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Remember == true {
+			// The real portal answers 500 to "remember me" (observed 2026-10-05).
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if body.Email == f.email && body.Password == f.password {
 			sess.authed = true
 			http.Redirect(w, r, "/dashboard", http.StatusFound)

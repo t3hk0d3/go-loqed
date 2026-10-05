@@ -85,7 +85,7 @@ func (c *Client) Login(ctx context.Context, email, password string) (*Session, e
 	if _, err := s.loadPage(ctx, "/login"); err != nil {
 		return nil, err
 	}
-	p, err := s.visit(ctx, http.MethodPost, "/login", map[string]any{"email": email, "password": password, "remember": true})
+	p, err := s.visit(ctx, http.MethodPost, "/login", map[string]any{"email": email, "password": password, "remember": false}) // "remember me" makes the real portal fail with 500
 	if err != nil {
 		return nil, err
 	}
