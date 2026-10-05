@@ -98,6 +98,13 @@ func (s *Subscriber) WaitFor(t *testing.T, timeout time.Duration, match func(Mes
 	return Message{}
 }
 
+// Messages returns every message received so far, in order.
+func (s *Subscriber) Messages() []Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Message(nil), s.msgs...)
+}
+
 func (s *Subscriber) Count(match func(Message) bool) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

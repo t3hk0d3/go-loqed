@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/t3hk0d3/go-loqed/internal/app"
 	"github.com/t3hk0d3/go-loqed/internal/config"
+	"github.com/t3hk0d3/go-loqed/internal/gateway"
 	"github.com/t3hk0d3/go-loqed/internal/model"
 	"github.com/t3hk0d3/go-loqed/internal/store"
 	"github.com/t3hk0d3/go-loqed/internal/testutil"
@@ -31,11 +34,25 @@ import (
 
 const bridgeKey = "Ym9uam91ciBtb25kZQ==" // "bonjour monde"
 
+// fakeBridge behaves like the real bridge (spec 2.1): it answers every
+// /to_lock with 200, acts only on a valid, fresh signature, announces the
+// movement with GO_TO_STATE_* and STATE_CHANGED_* webhooks, and updates
+// /status only after the webhooks were delivered.
 type fakeBridge struct {
 	mu       sync.Mutex
 	webhooks []string
-	actions  []byte
+	actions  []byte // executed (validly signed) actions
+	requests int    // /to_lock calls, valid or not
 	bolt     string
+	secret   []byte // key secret the lock accepts; nil = the fake cloud's
+}
+
+const keySecret = "SGFsbG8gd2VyZWxk" // "Hallo werld", served by fakeCloud
+
+var moves = map[byte]struct{ goTo, goToState, changed, bolt string }{
+	1: {"GO_TO_STATE_INSTANTOPEN_OPEN", "OPEN", "STATE_CHANGED_OPEN", "open"},
+	2: {"GO_TO_STATE_MANUAL_UNLOCK_REMOTE_LATCH", "DAY_LOCK", "STATE_CHANGED_LATCH", "day_lock"},
+	3: {"GO_TO_STATE_MANUAL_LOCK_REMOTE_NIGHT_LOCK", "NIGHT_LOCK", "STATE_CHANGED_NIGHT_LOCK", "night_lock"},
 }
 
 func (f *fakeBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,13 +72,64 @@ func (f *fakeBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.webhooks = append(f.webhooks, body.URL)
 	case r.URL.Path == "/to_lock":
+		f.requests++
 		raw, _ := url.QueryUnescape(strings.TrimPrefix(r.URL.RawQuery, "command_signed_base64="))
 		cmd, _ := base64.StdEncoding.DecodeString(raw)
-		if len(cmd) > 0 {
-			f.actions = append(f.actions, cmd[len(cmd)-1])
+		if key, action, ok := f.verify(cmd); ok {
+			f.actions = append(f.actions, action)
+			go f.move(key, action, append([]string(nil), f.webhooks...))
 		}
+		_, _ = w.Write([]byte("Message resent to the lock"))
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// verify checks the HMAC and the timestamp like the lock does.
+func (f *fakeBridge) verify(cmd []byte) (key, action byte, ok bool) {
+	if len(cmd) != 8+2+8+sha256.Size+3 {
+		return 0, 0, false
+	}
+	secret := f.secret
+	if secret == nil {
+		secret, _ = base64.StdEncoding.DecodeString(keySecret)
+	}
+	ts := int64(binary.BigEndian.Uint64(cmd[10:18]))
+	key, action = cmd[len(cmd)-3], cmd[len(cmd)-1]
+	signed := append(append([]byte{}, cmd[8:18]...), key, cmd[len(cmd)-2], action)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(signed)
+	fresh := time.Since(time.Unix(ts, 0)) < 60*time.Second
+	return key, action, fresh && hmac.Equal(mac.Sum(nil), cmd[18:18+sha256.Size])
+}
+
+func (f *fakeBridge) move(key, action byte, hooks []string) {
+	m := moves[action]
+	time.Sleep(50 * time.Millisecond)
+	for _, h := range hooks {
+		postSigned(h, fmt.Sprintf(`{"go_to_state":%q,"event_type":%q,"key_local_id":%d,"mac_wifi":"aa","mac_ble":"bb"}`, m.goToState, m.goTo, key))
+	}
+	time.Sleep(150 * time.Millisecond)
+	for _, h := range hooks {
+		postSigned(h, fmt.Sprintf(`{"requested_state":%q,"event_type":%q,"key_local_id":%d,"mac_wifi":"aa","mac_ble":"bb"}`, m.goToState, m.changed, key))
+	}
+	f.mu.Lock()
+	f.bolt = m.bolt // /status catches up after the webhooks
+	f.mu.Unlock()
+}
+
+// postSigned POSTs a bridge webhook signed with the bridge key.
+func postSigned(hookURL, body string) {
+	ts := time.Now().Unix()
+	h := sha256.New()
+	h.Write([]byte(body))
+	h.Write(binary.BigEndian.AppendUint64(nil, uint64(ts)))
+	h.Write([]byte("bonjour monde"))
+	req, _ := http.NewRequest(http.MethodPost, hookURL, strings.NewReader(body))
+	req.Header["TIMESTAMP"] = []string{strconv.FormatInt(ts, 10)} // verbatim, like the bridge
+	req.Header["HASH"] = []string{hex.EncodeToString(h.Sum(nil))}
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		_ = resp.Body.Close()
 	}
 }
 
@@ -92,7 +160,7 @@ func fakeCloud(t *testing.T, bridgeHost string, calls *atomic.Int32) *httptest.S
 			return
 		}
 		_, _ = fmt.Fprintf(w, `{"data":[{"id":"lock1","name":"Front door","model_name":"LOQED Touch","bolt_state":"day_lock","online":true,
-			"bridge_ip":%q,"local_id":1,"key_secret":"SGFsbG8gd2VyZWxk","bridge_key":%q,"bridge_mac_wifi":"aa:bb:cc:dd:ee:ff"}]}`, bridgeHost, bridgeKey)
+			"bridge_ip":%q,"local_id":1,"key_secret":%q,"bridge_key":%q,"bridge_mac_wifi":"aa:bb:cc:dd:ee:ff"}]}`, bridgeHost, keySecret, bridgeKey)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -109,7 +177,7 @@ func baseConfig(cachePath, broker string) config.Config {
 
 // start runs the app and returns its webhook address and a stop function
 // that cancels it and waits for a clean return.
-func start(t *testing.T, cfg config.Config, cloudURL string) (string, func()) {
+func start(t *testing.T, cfg config.Config, cloudURL string, timing ...func(*gateway.Timing)) (string, func()) {
 	t.Helper()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -118,8 +186,12 @@ func start(t *testing.T, cfg config.Config, cloudURL string) (string, func()) {
 	ready := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- app.Run(ctx, app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler), Version: "e2e",
-			CloudBaseURL: cloudURL, Ready: func(addr string) { ready <- addr }})
+		o := app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler), Version: "e2e",
+			CloudBaseURL: cloudURL, Ready: func(addr string) { ready <- addr }}
+		if len(timing) > 0 {
+			o.Timing = timing[0]
+		}
+		done <- app.Run(ctx, o)
 	}()
 	var addr string
 	select {
@@ -194,13 +266,9 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("healthz %d %+v", resp.StatusCode, health)
 	}
 
-	var hookURL string
 	eventually(t, "webhook registration", func() bool {
 		hooks, _ := fb.snapshot()
-		if len(hooks) == 1 {
-			hookURL = hooks[0]
-		}
-		return hookURL != ""
+		return len(hooks) == 1
 	})
 
 	sub.Publish(t, "loqed/lock1/command", "LOCK", false)
@@ -208,29 +276,15 @@ func TestEndToEnd(t *testing.T) {
 		_, actions := fb.snapshot()
 		return len(actions) == 1 && actions[0] == 3
 	})
-
-	body := `{"requested_state":"NIGHT_LOCK","event_type":"STATE_CHANGED_NIGHT_LOCK","key_local_id":255,"mac_wifi":"aa","mac_ble":"bb"}`
-	ts := time.Now().Unix()
-	h := sha256.New()
-	h.Write([]byte(body))
-	h.Write(binary.BigEndian.AppendUint64(nil, uint64(ts)))
-	h.Write([]byte("bonjour monde"))
-	req, _ := http.NewRequest(http.MethodPost, hookURL, strings.NewReader(body))
-	req.Header["TIMESTAMP"] = []string{strconv.FormatInt(ts, 10)} // verbatim, like the bridge
-	req.Header["HASH"] = []string{hex.EncodeToString(h.Sum(nil))}
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("webhook post: %v %v", resp, err)
-	}
-	_ = resp.Body.Close()
-
+	// The fake bridge announces the movement through its webhooks.
 	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
 		var s model.State
 		return m.Topic == "loqed/lock1/state" && json.Unmarshal(m.Payload, &s) == nil && s.Lock != nil && *s.Lock == model.Locked
 	})
 	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
 		var e model.Event
-		return m.Topic == "loqed/lock1/event" && json.Unmarshal(m.Payload, &e) == nil && e.EventType == model.EventLocked
+		return m.Topic == "loqed/lock1/event" && json.Unmarshal(m.Payload, &e) == nil && e.EventType == model.EventLocked &&
+			e.Source == model.SourceGateway
 	})
 
 	// Cloud route: enriches the bridge event with the key name.
@@ -372,4 +426,88 @@ func TestRemovedIDsStayPublishedUntilCleared(t *testing.T) {
 		return m.Topic == "loqed/ghost/state" && len(m.Payload) == 0
 	})
 	eventually(t, "published_ids without the cleared lock", func() bool { return len(published()) == 1 })
+}
+
+// commandStatuses collects the command_status trail of lock1.
+func commandStatuses(sub *testutil.Subscriber) []model.CommandStatus {
+	var out []model.CommandStatus
+	for _, m := range sub.Messages() {
+		var st model.CommandStatus
+		if m.Topic == "loqed/lock1/command_status" && json.Unmarshal(m.Payload, &st) == nil {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+func startLock(t *testing.T, fb *fakeBridge, timing ...func(*gateway.Timing)) *testutil.Subscriber {
+	t.Helper()
+	broker := testutil.StartBroker(t)
+	sub := testutil.Subscribe(t, broker, "loqed/#")
+	bridgeSrv := httptest.NewServer(fb)
+	t.Cleanup(bridgeSrv.Close)
+	var calls atomic.Int32
+	cloudSrv := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	cfg := baseConfig(filepath.Join(t.TempDir(), "locks.json"), broker)
+	cfg.MQTT.ClientID = "gw-" + t.Name()
+	start(t, cfg, cloudSrv.URL, timing...)
+	eventually(t, "webhook registration", func() bool {
+		hooks, _ := fb.snapshot()
+		return len(hooks) == 1
+	})
+	return sub
+}
+
+func TestEndToEndCommandIsConfirmedByWebhooks(t *testing.T) {
+	fb := &fakeBridge{bolt: "night_lock"}
+	sub := startLock(t, fb)
+	sub.Publish(t, "loqed/lock1/command", "UNLOCK", false)
+	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
+		var st model.CommandStatus
+		return m.Topic == "loqed/lock1/command_status" && json.Unmarshal(m.Payload, &st) == nil && st.Status == model.StatusConfirmed
+	})
+	var trail []model.CommandStatusValue
+	for _, st := range commandStatuses(sub) {
+		trail = append(trail, st.Status)
+	}
+	want := []model.CommandStatusValue{model.StatusPending, model.StatusSending, model.StatusSent, model.StatusAccepted, model.StatusConfirmed}
+	if !slices.Equal(trail, want) {
+		t.Fatalf("command_status %v, want %v", trail, want)
+	}
+	var locks []model.LockState
+	for _, m := range sub.Messages() {
+		var s model.State
+		if m.Topic == "loqed/lock1/state" && json.Unmarshal(m.Payload, &s) == nil && s.Lock != nil {
+			locks = append(locks, *s.Lock)
+		}
+	}
+	if !slices.Contains(locks, model.Unlocking) || locks[len(locks)-1] != model.Unlocked {
+		t.Fatalf("lock states %v", locks)
+	}
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if fb.requests != 1 {
+		t.Fatalf("exactly one /to_lock call, got %d", fb.requests)
+	}
+}
+
+// The bridge acknowledges commands it cannot verify; only the missing
+// webhooks show that nothing happened.
+func TestEndToEndUnverifiedCommandFailsWithoutConfirmation(t *testing.T) {
+	fb := &fakeBridge{bolt: "day_lock", secret: []byte("another key")}
+	sub := startLock(t, fb, func(tm *gateway.Timing) { tm.WebhookConfirm = time.Second })
+	sub.Publish(t, "loqed/lock1/command", `{"command":"LOCK","id":"e2e"}`, false)
+	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
+		var st model.CommandStatus
+		return m.Topic == "loqed/lock1/command_status" && json.Unmarshal(m.Payload, &st) == nil && st.Status == model.StatusFailed
+	})
+	sts := commandStatuses(sub)
+	last := sts[len(sts)-1]
+	if last.Error == nil || *last.Error != model.FailNoConfirmation || last.ID == nil || *last.ID != "e2e" {
+		t.Fatalf("status %+v", last)
+	}
+	_, actions := fb.snapshot()
+	if len(actions) != 0 {
+		t.Fatalf("the lock must not act on a bad signature: %v", actions)
+	}
 }

@@ -61,6 +61,9 @@ func BridgeAddress(bridgeIP string) string {
 }
 
 type BridgeEventMsg struct{ Event bridge.Event }
+
+// RecordMsg replaces the lock's credentials (after a runtime refresh).
+type RecordMsg struct{ Record store.LockRecord }
 type CloudEventMsg struct{ Event cloud.WebhookEvent }
 type CommandMsg struct {
 	Command model.Command
@@ -82,8 +85,11 @@ type Deps struct {
 	// SaveCloudWebhookID persists the numeric cloud lock id first seen on a
 	// lock's cloud webhook URL (nil: keep it in memory only).
 	SaveCloudWebhookID func(lockID, id string) error
-	Now                func() time.Time
-	Log                *slog.Logger
+	// TokenExpiry reports when the cloud token in use expires (nil or
+	// false: unknown).
+	TokenExpiry func() (time.Time, bool)
+	Now         func() time.Time
+	Log         *slog.Logger
 }
 
 type Timing struct {
@@ -351,6 +357,9 @@ func (s *Supervisor) handle(ctx context.Context, m any) {
 		s.onCloudEvent(ctx, m.Event)
 	case CommandMsg:
 		s.cmds.Submit(ctx, s.d.Now(), m.Command, m.ID, m.At)
+	case RecordMsg:
+		s.setRecord(m.Record)
+		s.ensureBridge()
 	}
 }
 
@@ -362,6 +371,12 @@ func (s *Supervisor) available() bool { return s.mode != model.ModeOffline && s.
 
 // publish sends the state document and availability, and updates Health.
 func (s *Supervisor) publish() {
+	s.state.TokenExpiresAt = nil
+	if s.d.TokenExpiry != nil {
+		if exp, ok := s.d.TokenExpiry(); ok {
+			s.state.TokenExpiresAt = &exp
+		}
+	}
 	if err := s.d.Publisher.PublishState(s.id, s.state); err != nil {
 		s.log.Warn("publishing state failed", "err", err)
 	}

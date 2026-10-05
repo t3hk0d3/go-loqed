@@ -51,15 +51,16 @@ addon/                       HA add-on config.yaml, DOCS.md, translations
 ## Conventions
 
 - **Style:** `gofmt` + `.golangci.yml` (standard linters + errorlint, gosec, misspell, unconvert). Follow the surrounding code; keep comments sparse and explanatory.
-- **Errors:** callers branch only on `loqed.ErrUnauthorized`, `ErrRateLimited`, `ErrUnreachable` (provably not delivered), `ErrNoResponse` (may have been delivered), `ErrBadSignature`, `ErrStaleTimestamp`, `ErrInvalidPayload`, or `*loqed.APIError`. Wrap with `%w`; use `errors.Is/As`.
-- **No secrets in errors or logs:** never include tokens, passwords, keys, signed commands, URLs/query strings, headers, portal HTML, full cloud responses or cloud webhook bodies — this includes context-canceled and invalid-address errors. Cloud webhook decoding must never decode `key_name_admin`, `key_account_e-mail`, `key_account_name`.
+- **Errors:** callers branch only on `loqed.ErrUnauthorized`, `ErrRateLimited`, `ErrUnreachable` (provably not delivered), `ErrNoResponse` (may have been delivered), `ErrBadSignature`, `ErrStaleTimestamp`, `ErrInvalidPayload`, or `*loqed.APIError` (plus `cloud.ErrKeyDeleted` for cloud commands). Wrap with `%w`; use `errors.Is/As`.
+- **No secrets in errors or logs:** never include tokens, passwords, keys, signed commands, URLs/query strings, headers, portal HTML, full cloud responses or cloud webhook bodies — this includes context-canceled and invalid-address errors. Cloud webhook decoding must never decode `key_name_admin`, `key_account_email`/`key_account_e-mail`, `key_account_name` or `value1..value3` (they carry the account e-mail).
 - **Logging:** `log/slog`; mode transitions at info; repeated identical warnings are rate-limited.
 - **Tests:** stdlib `testing` only, table tests against `httptest` servers, fixtures/golden files under `testdata/`. Test names read as behaviour (`TestCommandErrorDoesNotLeakSignedCommand`). Gateway tests use fake bridge/cloud interfaces and an injectable clock — no real sleeps. Integration tests use `internal/testutil` (in-process broker).
 - **Commits:** short lowercase `<area>: <what>` subject (e.g. `gateway: retry lagging confirmations`), ending with the `Co-Authored-By` trailer.
 
 ## Safety-critical invariants (do not regress)
 
-- A command is resent via the cloud **only** after `ErrUnreachable` (or an unusable bridge client) or `ErrUnauthorized` — **never** after `ErrNoResponse`. A slow bridge that got `OPEN` must not get a second `OPEN` via the cloud. Bridge/cloud HTTP clients use `DisableKeepAlives` so net/http never silently replays a request.
+- A command is retried (locally with backoff, then once via the cloud) **only** after `ErrUnreachable` (or an unusable bridge client) or `ErrUnauthorized` — **never** after `ErrNoResponse` or any answer. A slow bridge that got `OPEN` must not get a second `OPEN`. Every attempt is signed afresh. Bridge/cloud HTTP clients use `DisableKeepAlives` so net/http never silently replays a request. Command pipeline: `internal/gateway/pipeline.go` (spec 5.8).
+- The bridge answers every `/to_lock` with 200; only webhooks (`GO_TO_STATE_*` with the gateway key, then `STATE_CHANGED_*`) confirm a command. `/status` lags and is only a hint.
 - Retained messages on `<base>/<id>/command` are ignored (a retained `OPEN` must never unlatch the door on reconnect).
 - LOQED blocks an account after >12 cloud calls in 12 h. The gateway's `cloud_budget` (default 10, max 12) is persisted across restarts; crash loops must not exceed it.
 - Bridge wire details: headers exactly `TIMESTAMP` / `HASH` (upper case on the wire), webhook timestamp tolerance ±10 s, command query escaping replaces only `+` and `=`. State-reached events derive bolt state from `event_type`, never `requested_state`.

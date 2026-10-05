@@ -31,9 +31,32 @@ every setting.
 | `loqed/<id>/availability` | yes | `online` / `offline` |
 | `loqed/<id>/state` | yes | JSON state document |
 | `loqed/<id>/event` | no | JSON lock event (incl. `command_failed`) |
-| `loqed/<id>/command` | must not be retained | `LOCK`, `UNLOCK` or `OPEN` |
+| `loqed/<id>/command` | must not be retained | `LOCK`, `UNLOCK` or `OPEN`, or JSON `{"command":"LOCK","id":"my-id"}` |
+| `loqed/<id>/command_status` | yes | JSON status of the last command |
 
 Retained messages on the command topic are ignored.
+
+`command_status` follows each command:
+
+```json
+{"command":"LOCK","id":"my-id","status":"confirmed","via":"local","attempts":1,"error":null,
+ "received_at":"2026-10-06T12:00:00.000Z","updated_at":"2026-10-06T12:00:09.412Z"}
+```
+
+- `status` goes `pending` → `sending` → `sent` → `accepted` → `confirmed`, or
+  ends `failed`, `expired` or `superseded`.
+- `sent` only means the bridge or cloud received the request. The bridge
+  answers every request, even one the lock will reject. A command counts as
+  `accepted` when the lock starts moving with the gateway's key, and as
+  `confirmed` when it reaches the target.
+- `error` is set for `failed`: `unreachable`, `no_response`, `rejected`,
+  `unauthorized`, `key_deleted`, `rate_limited`, `stalled`, `no_confirmation`
+  or `offline`.
+- The optional `id` (up to 64 printable characters) is echoed back, so an
+  automation can match a status to its command.
+- Only the latest command counts. A newer command replaces one that has not
+  been sent yet, and that one ends as `superseded`. A command the bridge may
+  already have received is never sent again.
 
 ## Releasing
 

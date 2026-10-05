@@ -9,6 +9,7 @@ import (
 	"github.com/t3hk0d3/go-loqed/bridge"
 	"github.com/t3hk0d3/go-loqed/cloud"
 	"github.com/t3hk0d3/go-loqed/internal/model"
+	"github.com/t3hk0d3/go-loqed/internal/store"
 )
 
 var (
@@ -119,6 +120,15 @@ func (m *Manager) DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error 
 
 func (m *Manager) DeliverCommand(lockID string, c model.Command, id string, at time.Time) error {
 	return m.deliver(lockID, CommandMsg{Command: c, ID: id, At: at})
+}
+
+// UpdateRecords hands refreshed credentials to the running supervisors.
+func (m *Manager) UpdateRecords(recs []store.LockRecord) {
+	for _, r := range recs {
+		// Unknown locks are not managed; a full queue only delays the
+		// update until the lock's own next refresh.
+		_ = m.deliver(r.ID, RecordMsg{Record: r})
+	}
 }
 
 func (m *Manager) BridgeKey(lockID string) ([]byte, bool) {

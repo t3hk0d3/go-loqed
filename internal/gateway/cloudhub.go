@@ -67,6 +67,14 @@ func (h *CloudHub) Token() string {
 	return h.token
 }
 
+// ResetToken makes the next request ask the token source again (after the
+// token was replaced elsewhere, for example before it expires).
+func (h *CloudHub) ResetToken() {
+	h.mu.Lock()
+	h.api, h.token = nil, ""
+	h.mu.Unlock()
+}
+
 // Budget exposes the shared budget (for spacing and diagnostics).
 func (h *CloudHub) Budget() *Budget { return h.budget }
 

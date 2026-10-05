@@ -199,3 +199,18 @@ func TestHubCommandDeletedKeyIsNotResent(t *testing.T) {
 		t.Fatalf("next command must use the replacement: %v fresh=%d", err, fresh.commands)
 	}
 }
+
+func TestHubResetTokenResolvesAgain(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	old, fresh := &scriptedAPI{}, &scriptedAPI{}
+	tokens := &fakeTokens{token: "a"}
+	h := newHub(&now, tokens, map[string]*scriptedAPI{"a": old, "b": fresh})
+	if err := h.Command(context.Background(), "lock1", loqed.BoltOpen); err != nil || old.commands != 1 {
+		t.Fatal(err)
+	}
+	tokens.token = "b" // re-minted elsewhere
+	h.ResetToken()
+	if err := h.Command(context.Background(), "lock1", loqed.BoltOpen); err != nil || fresh.commands != 1 || h.Token() != "b" {
+		t.Fatalf("err %v fresh %d token %q", err, fresh.commands, h.Token())
+	}
+}

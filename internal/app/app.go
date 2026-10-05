@@ -34,6 +34,7 @@ type Options struct {
 	PortalBaseURL string // empty = production
 	Now           func() time.Time
 	Ready         func(webhookAddr string) // test hook
+	Timing        func(*gateway.Timing)    // test hook: shorten supervisor timings
 }
 
 // budgetWindow is LOQED's documented rate-limit window.
@@ -169,10 +170,14 @@ func Run(ctx context.Context, o Options) error {
 				}
 			})
 		},
-		Now: now,
-		Log: log,
+		TokenExpiry: resolver.Expiry,
+		Now:         now,
+		Log:         log,
 	}
 	timing := gateway.DefaultTiming(cfg.LivenessInterval.D(), cfg.ReconcileInterval.D(), budget.Spacing())
+	if o.Timing != nil {
+		o.Timing(&timing)
+	}
 	sups := make([]*gateway.Supervisor, 0, len(selected))
 	for _, r := range selected {
 		sups = append(sups, gateway.NewSupervisor(r, gateway.SettingFor(cfg.LockSettings, r), deps, timing))
@@ -215,6 +220,16 @@ func Run(ctx context.Context, o Options) error {
 	}
 	go forwardCommands(runCtx, mq, manager, log)
 	go refreshByAge(runCtx, refresher, cfg.CacheMaxAge.D(), log)
+	go watchTokenExpiry(runCtx, resolver.CheckExpiry, func(ctx context.Context) {
+		// A new token comes with a new lock key: use both from now on.
+		hub.ResetToken()
+		recs, err := refresher.RefreshAll(ctx)
+		if recs == nil {
+			log.Warn("refreshing the locks after replacing the token failed", "err", err)
+			return
+		}
+		manager.UpdateRecords(recs)
+	}, expiryCheckInterval, log)
 	if o.Ready != nil {
 		o.Ready(ln.Addr().String())
 	}
@@ -238,6 +253,31 @@ func forwardCommands(ctx context.Context, mq *hass.Client, m *gateway.Manager, l
 			if err := m.DeliverCommand(c.LockID, c.Command, c.ID, c.At); err != nil {
 				log.Warn("command not delivered", "lock_id", c.LockID, "err", err)
 			}
+		}
+	}
+}
+
+// expiryCheckInterval: how often the token's expiry is checked.
+const expiryCheckInterval = time.Hour
+
+// watchTokenExpiry checks the token's expiry now and every interval, and
+// runs onRemint after the token was replaced.
+func watchTokenExpiry(ctx context.Context, check func(context.Context) (bool, error), onRemint func(context.Context),
+	interval time.Duration, log *slog.Logger) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		reminted, err := check(ctx)
+		if err != nil && ctx.Err() == nil {
+			log.Debug("token expiry check failed", "err", err)
+		}
+		if reminted {
+			onRemint(ctx)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }
