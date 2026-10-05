@@ -105,6 +105,8 @@ func (s *Supervisor) sendViaCloud(cctx context.Context, c model.Command) {
 	if err == nil {
 		moving := c.Moving()
 		s.state.Lock = &moving
+		// Poll data fetched before the command must not overwrite this.
+		s.lastEventAt = now
 		s.publish()
 		s.scheduleCloudConfirm(now, c.Target())
 		return

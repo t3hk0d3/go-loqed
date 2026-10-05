@@ -167,6 +167,7 @@ type Supervisor struct {
 	confirmViaCloud   bool            // if that /status fails, ask the cloud
 	cloudConfirmAt    time.Time       // cloud confirmation poll at this time
 	cloudConfirmSince time.Time       // only data fetched after this counts
+	confirmRetried    bool            // the one extra confirmation poll was used
 
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
@@ -246,6 +247,9 @@ func (s *Supervisor) start(ctx context.Context) {
 }
 
 func (s *Supervisor) tick(ctx context.Context) {
+	if ctx.Err() != nil {
+		return // shutting down: no new requests
+	}
 	now := s.d.Now()
 	if !s.cloudConfirmAt.IsZero() && !now.Before(s.cloudConfirmAt) {
 		s.cloudConfirmAt = time.Time{}
@@ -333,8 +337,11 @@ func (s *Supervisor) warn(msg string, args ...any) {
 // recordEvent applies a lock event, publishes state and the HA event.
 func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, cloudKeyName string, t model.Transition, fromBridge bool) {
 	s.state.Apply(t)
-	s.state.StateStale = false
-	s.lastFreshAt, s.lastEventAt = now, now
+	if t.SetBolt || t.SetLock {
+		s.state.StateStale = false
+		s.lastFreshAt = now
+	}
+	s.lastEventAt = now
 	key := model.NormalizeKeyID(rawKey)
 	name := s.keyName(key, cloudKeyName)
 	at := now.UTC().Truncate(time.Second)
@@ -378,6 +385,7 @@ func (s *Supervisor) scheduleCloudConfirm(now time.Time, target loqed.BoltState)
 	s.confirmTarget = target
 	s.cloudConfirmAt = now.Add(s.t.CloudConfirm)
 	s.cloudConfirmSince = now
+	s.confirmRetried = false
 }
 
 // commandFailed reports a command failure to HA as a command_failed event.

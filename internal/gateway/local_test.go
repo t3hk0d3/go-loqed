@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -267,5 +268,48 @@ func TestBridgeEventAppliedWhenLocalEntryFails(t *testing.T) {
 func TestBridgeAddress(t *testing.T) {
 	if BridgeAddress("192.0.2.10") != "192.0.2.10:80" || BridgeAddress("127.0.0.1:8080") != "127.0.0.1:8080" {
 		t.Fatal("BridgeAddress")
+	}
+}
+
+// A bridge can lose its webhook (factory reset, slot cleanup); the periodic
+// reconcile must put it back.
+func TestLostBridgeWebhookIsRecreatedAtReconcile(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	if len(h.bridge.created) != 1 || !h.s.webhookOK {
+		t.Fatalf("created %v", h.bridge.created)
+	}
+	h.bridge.hooks = nil
+	h.advance(24 * time.Hour)
+	if len(h.bridge.created) != 2 {
+		t.Fatalf("webhook not re-created: %v", h.bridge.created)
+	}
+}
+
+// An unrecognized event carries no state, so it cannot make stale data fresh.
+func TestUnrecognizedEventKeepsStateStale(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.s.markStale()
+	h.send(reached("SOMETHING_ELSE", nil))
+	if !h.state().StateStale {
+		t.Fatal("an event without state cleared state_stale")
+	}
+	h.send(reached("STATE_CHANGED_LATCH", nil))
+	if h.state().StateStale {
+		t.Fatal("a state event must clear state_stale")
+	}
+}
+
+func TestTickDoesNothingAfterShutdown(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	h.now = h.now.Add(24 * time.Hour)
+	probes, status := len(h.probes), h.bridge.statusCalls
+	h.s.tick(ctx)
+	if len(h.probes) != probes || h.bridge.statusCalls != status {
+		t.Fatal("tick issued requests after shutdown")
 	}
 }

@@ -186,7 +186,8 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 			if now.Before(s.nextReconcile) {
 				return true
 			}
-			if !s.webhookOK && !s.registerWebhook(ctx) {
+			// Re-check the webhook every time: a bridge may drop it.
+			if !s.registerWebhook(ctx) {
 				return false
 			}
 			s.reconcile(ctx)

@@ -254,3 +254,74 @@ func TestCommandExpiringDuringBridgeAttemptIsNotSentViaCloud(t *testing.T) {
 		t.Fatalf("command_failed %v", got)
 	}
 }
+
+// The cloud may still report the pre-command state at the first confirmation
+// poll; that must not be published as fresh. One more poll catches up.
+func TestLaggingCloudConfirmationIsStaleThenRetriedOnce(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.toCloud()
+	confirms := func() (n int) {
+		for _, p := range h.cloud.calls {
+			if p == PriorityConfirm {
+				n++
+			}
+		}
+		return n
+	}
+	h.command(model.CommandLock)
+	h.run(5 * time.Second)
+	if confirms() != 1 || h.lock() != "UNLOCKED" || !h.state().StateStale {
+		t.Fatalf("lagging poll: confirms %d lock %s stale %v", confirms(), h.lock(), h.state().StateStale)
+	}
+	h.cloud.locks[0].BoltState = loqed.BoltNightLock
+	h.run(5 * time.Second)
+	if confirms() != 2 || h.lock() != "LOCKED" || h.state().StateStale {
+		t.Fatalf("retry: confirms %d lock %s stale %v", confirms(), h.lock(), h.state().StateStale)
+	}
+	h.run(30 * time.Second)
+	if confirms() != 2 {
+		t.Fatalf("confirms %d", confirms())
+	}
+}
+
+// After the one retry a still-lagging cloud stays stale; no third poll.
+func TestLaggingCloudConfirmationRetriesAtMostOnce(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.toCloud()
+	h.command(model.CommandLock)
+	h.run(30 * time.Second)
+	n := 0
+	for _, p := range h.cloud.calls {
+		if p == PriorityConfirm {
+			n++
+		}
+	}
+	if n != 2 || !h.state().StateStale {
+		t.Fatalf("confirms %d stale %v", n, h.state().StateStale)
+	}
+}
+
+// A background poll started by the failover that follows a cloud-sent command
+// may carry data fetched before the command; it must not undo LOCKING.
+func TestFallbackPollWithPreCommandDataKeepsMovingState(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.s.httpFailures = 2
+	h.bridge.commandErrs = []error{loqed.ErrUnreachable}
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.cloud.fetchedAt = h.now.Add(-5 * time.Second)
+	h.command(model.CommandLock)
+	if h.s.mode != model.ModeCloud || h.lock() != "LOCKING" {
+		t.Fatalf("mode %s lock %s", h.s.mode, h.lock())
+	}
+	h.cloud.fetchedAt = time.Time{}
+	h.cloud.locks[0].BoltState = loqed.BoltNightLock
+	h.run(5 * time.Second)
+	if h.lock() != "LOCKED" {
+		t.Fatalf("lock %s", h.lock())
+	}
+}
