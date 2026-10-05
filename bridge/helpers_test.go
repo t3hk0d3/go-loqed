@@ -1,6 +1,9 @@
 package bridge_test
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,3 +34,10 @@ func newTestClient(t *testing.T, h http.Handler) *bridge.Client {
 	}
 	return c
 }
+
+func hashForTest(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+func be64ForTest(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
