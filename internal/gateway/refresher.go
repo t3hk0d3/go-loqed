@@ -117,6 +117,10 @@ func (r *Refresher) Refresh(ctx context.Context, lockID string, reason Reason) (
 	old, _ := r.store.Snapshot().Find(lockID)
 	recs, err := r.RefreshAll(ctx)
 	if recs == nil {
+		r.mu.Lock()
+		b.interval = min(2*b.interval, refreshBackoffMax)
+		b.next = now.Add(b.interval)
+		r.mu.Unlock()
 		return store.LockRecord{}, err
 	}
 	for _, rec := range recs {

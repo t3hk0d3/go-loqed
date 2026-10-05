@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"slices"
+
 	"github.com/t3hk0d3/go-loqed/internal/config"
 	"github.com/t3hk0d3/go-loqed/internal/store"
 )
@@ -85,5 +87,6 @@ func UnmatchedSettings(settings config.LockSettingsMap, records []store.LockReco
 			out = append(out, key)
 		}
 	}
+	slices.Sort(out)
 	return out
 }

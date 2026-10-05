@@ -182,3 +182,39 @@ func TestSelectAndSettings(t *testing.T) {
 		t.Fatalf("unmatched %v", u)
 	}
 }
+
+func TestRefreshBacksOffWhenCloudFails(t *testing.T) {
+	for name, setup := range map[string]func(l *listerStub){
+		"error":      func(l *listerStub) { l.err = errors.New("boom") },
+		"empty list": func(l *listerStub) { l.locks = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := newStore(t)
+			l := &listerStub{locks: []cloud.Lock{cloudLock("lock1", "192.0.2.4")}}
+			now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+			r := NewRefresher(l, st, func() time.Time { return now })
+			ctx := context.Background()
+			_, _ = r.RefreshAll(ctx) // cache primed
+			setup(l)
+			l.calls = 0
+			var attempts []time.Duration
+			start := now
+			for now.Sub(start) < 12*time.Hour {
+				_, err := r.Refresh(ctx, "lock1", ReasonUnreachable)
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				if !errors.Is(err, ErrRefreshThrottled) {
+					attempts = append(attempts, now.Sub(start))
+				}
+				now = now.Add(time.Minute)
+			}
+			if l.calls > 8 || len(attempts) != l.calls {
+				t.Fatalf("%d cloud calls, attempts %v", l.calls, attempts)
+			}
+			if attempts[1]-attempts[0] != 10*time.Minute {
+				t.Fatalf("second gap %v", attempts[1]-attempts[0])
+			}
+		})
+	}
+}
