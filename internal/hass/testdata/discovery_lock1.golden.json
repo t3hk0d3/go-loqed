@@ -1,0 +1,140 @@
+{
+  "availability": [
+    {
+      "topic": "loqed/status"
+    },
+    {
+      "topic": "loqed/lock1/availability"
+    }
+  ],
+  "availability_mode": "all",
+  "components": {
+    "battery": {
+      "device_class": "battery",
+      "name": "Battery",
+      "platform": "sensor",
+      "state_class": "measurement",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_battery",
+      "unit_of_measurement": "%",
+      "value_template": "{{ value_json.battery_percentage }}"
+    },
+    "battery_voltage": {
+      "device_class": "voltage",
+      "entity_category": "diagnostic",
+      "name": "Battery voltage",
+      "platform": "sensor",
+      "state_class": "measurement",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_battery_voltage",
+      "unit_of_measurement": "V",
+      "value_template": "{{ value_json.battery_voltage }}"
+    },
+    "ble_signal": {
+      "entity_category": "diagnostic",
+      "name": "Bluetooth signal",
+      "platform": "sensor",
+      "state_class": "measurement",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_ble_signal",
+      "value_template": "{{ value_json.ble_strength }}"
+    },
+    "connection_mode": {
+      "device_class": "enum",
+      "entity_category": "diagnostic",
+      "name": "Connection mode",
+      "options": [
+        "local",
+        "cloud",
+        "offline"
+      ],
+      "platform": "sensor",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_connection_mode",
+      "value_template": "{{ value_json.mode }}"
+    },
+    "event": {
+      "event_types": [
+        "locked",
+        "unlocked",
+        "opened",
+        "locking",
+        "unlocking",
+        "opening",
+        "jammed",
+        "unknown",
+        "command_failed"
+      ],
+      "name": "Lock event",
+      "platform": "event",
+      "state_topic": "loqed/lock1/event",
+      "unique_id": "loqed_lock1_event"
+    },
+    "last_change_reason": {
+      "json_attributes_template": "{{ {'key_local_id': value_json.last_key_id, 'key_name': value_json.last_key_name, 'last_event_at': value_json.last_event_at} | tojson }}",
+      "json_attributes_topic": "loqed/lock1/state",
+      "name": "Last change reason",
+      "platform": "sensor",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_last_change_reason",
+      "value_template": "{{ value_json.last_event }}"
+    },
+    "lock": {
+      "command_topic": "loqed/lock1/command",
+      "name": null,
+      "payload_lock": "LOCK",
+      "payload_open": "OPEN",
+      "payload_unlock": "UNLOCK",
+      "platform": "lock",
+      "qos": 1,
+      "state_jammed": "JAMMED",
+      "state_locked": "LOCKED",
+      "state_locking": "LOCKING",
+      "state_open": "OPEN",
+      "state_opening": "OPENING",
+      "state_topic": "loqed/lock1/state",
+      "state_unlocked": "UNLOCKED",
+      "state_unlocking": "UNLOCKING",
+      "unique_id": "loqed_lock1_lock",
+      "value_template": "{{ value_json.lock }}"
+    },
+    "lock_online": {
+      "device_class": "connectivity",
+      "entity_category": "diagnostic",
+      "name": "Lock online",
+      "platform": "binary_sensor",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_lock_online",
+      "value_template": "{{ 'ON' if value_json.lock_online else 'OFF' }}"
+    },
+    "wifi_signal": {
+      "entity_category": "diagnostic",
+      "name": "Wi-Fi signal",
+      "platform": "sensor",
+      "state_class": "measurement",
+      "state_topic": "loqed/lock1/state",
+      "unique_id": "loqed_lock1_wifi_signal",
+      "value_template": "{{ value_json.wifi_strength }}"
+    }
+  },
+  "device": {
+    "connections": [
+      [
+        "mac",
+        "aa:bb:cc:dd:ee:ff"
+      ]
+    ],
+    "identifiers": [
+      "loqed_lock1"
+    ],
+    "manufacturer": "LOQED",
+    "model": "LOQED Touch",
+    "name": "Front door"
+  },
+  "origin": {
+    "name": "loqed-mqtt",
+    "support_url": "https://github.com/t3hk0d3/go-loqed",
+    "sw_version": "1.2.3"
+  },
+  "qos": 1
+}
