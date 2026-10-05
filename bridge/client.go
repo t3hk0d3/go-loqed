@@ -42,8 +42,15 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
+// WithHTTPClient replaces the default client. The injected client must set
+// DisableKeepAlives on its transport, otherwise net/http may silently replay
+// a GET (a signed lock command) on a reused connection.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
+
+// WithClock overrides the time source used to sign requests and check webhooks.
 func WithClock(now func() time.Time) Option { return func(c *Client) { c.now = now } }
+
+// WithBaseURL overrides the bridge base URL (for tests).
 func WithBaseURL(base string) Option {
 	return func(c *Client) { c.base = strings.TrimRight(base, "/") }
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	loqed "github.com/t3hk0d3/go-loqed"
@@ -81,6 +82,48 @@ func TestListLocksInvalidJSON(t *testing.T) {
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"data":"nope"}`)) })
 	if _, err := c.ListLocks(context.Background()); !errors.Is(err, loqed.ErrInvalidPayload) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestListLocksMissingData(t *testing.T) {
+	for _, body := range []string{`{}`, `{"data":null}`, `{"other":[]}`} {
+		c := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) })
+		if _, err := c.ListLocks(context.Background()); !errors.Is(err, loqed.ErrInvalidPayload) {
+			t.Errorf("%s: got %v", body, err)
+		}
+	}
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"data":[]}`)) })
+	if locks, err := c.ListLocks(context.Background()); err != nil || len(locks) != 0 {
+		t.Fatalf("empty list: %v %v", locks, err)
+	}
+}
+
+// A command must never be delivered twice: with keep-alives net/http would
+// silently replay a GET whose reused connection died before any response.
+func TestCommandNotReplayedOnDeadConnection(t *testing.T) {
+	var commands atomic.Int32
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/locks/" {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		commands.Add(1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	if _, err := c.ListLocks(context.Background()); err != nil { // warms a connection
+		t.Fatal(err)
+	}
+	err := c.Command(context.Background(), "L1", loqed.BoltOpen)
+	if !errors.Is(err, loqed.ErrNoResponse) {
+		t.Fatalf("got %v", err)
+	}
+	if n := commands.Load(); n != 1 {
+		t.Fatalf("server saw the command %d times, want 1", n)
 	}
 }
 

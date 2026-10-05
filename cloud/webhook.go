@@ -25,7 +25,7 @@ type WebhookEvent struct {
 	EventType         string
 	BoltState         loqed.BoltState // reached state, derived from EventType (KindStateReached)
 	Jammed            bool            // MOTOR_STALL
-	RequestedState    loqed.BoltState // raw requested_state; informational only
+	RequestedState    loqed.BoltState // requested_state as sent (parsed); informational only
 	GoToState         loqed.BoltState // movement target (KindGoToState)
 	KeyLocalID        *int
 	KeyNameUser       string
@@ -41,7 +41,7 @@ type rawWebhook struct {
 	RequestedState    *loqed.String `json:"requested_state"`
 	GoToState         *loqed.String `json:"go_to_state"`
 	KeyLocalID        *loqed.Int    `json:"key_local_id"`
-	KeyNameUser       string        `json:"key_name_user"`
+	KeyNameUser       loqed.String  `json:"key_name_user"`
 	BatteryPercentage *loqed.Int    `json:"battery_percentage"`
 	WifiStrength      *loqed.Int    `json:"wifi_strength"`
 	BLEStrength       *loqed.Int    `json:"ble_strength"`
@@ -58,7 +58,7 @@ func ParseWebhook(body []byte) (WebhookEvent, error) {
 	if r.LockID == "" {
 		return WebhookEvent{}, fmt.Errorf("%w: cloud webhook without lock_id", loqed.ErrInvalidPayload)
 	}
-	ev := WebhookEvent{LockID: string(r.LockID), KeyNameUser: r.KeyNameUser,
+	ev := WebhookEvent{LockID: string(r.LockID), KeyNameUser: string(r.KeyNameUser),
 		BatteryPercentage: intPtr(r.BatteryPercentage), WifiStrength: intPtr(r.WifiStrength), BLEStrength: intPtr(r.BLEStrength)}
 	if r.KeyLocalID != nil && *r.KeyLocalID >= 0 && *r.KeyLocalID <= 255 {
 		ev.KeyLocalID = intPtr(r.KeyLocalID)

@@ -47,6 +47,11 @@ func TestIntRejectsGarbage(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"v":{}}`), &got); err == nil {
 		t.Fatal("expected error for object")
 	}
+	for _, v := range []string{`"NaN"`, `"Inf"`, `"-Inf"`, `1e30`, `"1e30"`} {
+		if err := json.Unmarshal([]byte(`{"v":`+v+`}`), &got); err == nil {
+			t.Errorf("%s: expected error", v)
+		}
+	}
 }
 
 func TestFloatBoolString(t *testing.T) {

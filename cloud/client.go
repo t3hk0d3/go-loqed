@@ -30,18 +30,25 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
+// WithBaseURL overrides DefaultBaseURL (for tests or proxies).
 func WithBaseURL(u string) Option { return func(c *Client) { c.base = strings.TrimRight(u, "/") } }
 
-// WithHTTPClient replaces the default client. Keep redirects disabled:
-// the API redirects unauthenticated calls to an HTML login page.
+// WithHTTPClient replaces the default client. The injected client must set
+// DisableKeepAlives on its transport (otherwise net/http may silently replay a
+// GET command on a reused connection) and must keep redirects disabled: the
+// API redirects unauthenticated calls to an HTML login page.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
 
+// New creates a client that authenticates with the personal access token.
 func New(token string, opts ...Option) *Client {
 	c := &Client{
 		base:  DefaultBaseURL,
 		token: token,
 		hc: &http.Client{
-			Timeout:       15 * time.Second,
+			Timeout: 15 * time.Second,
+			// Fresh connection per request, so net/http never silently replays
+			// a GET (a lock command) on a reused connection.
+			Transport:     &http.Transport{Proxy: http.ProxyFromEnvironment, DisableKeepAlives: true},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
@@ -139,13 +146,16 @@ func (c *Client) ListLocks(ctx context.Context) ([]Lock, error) {
 		return nil, err
 	}
 	var resp struct {
-		Data []rawLock `json:"data"`
+		Data *[]rawLock `json:"data"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("%w: locks: %w", loqed.ErrInvalidPayload, err)
 	}
-	locks := make([]Lock, 0, len(resp.Data))
-	for _, r := range resp.Data {
+	if resp.Data == nil {
+		return nil, fmt.Errorf("%w: locks: missing data", loqed.ErrInvalidPayload)
+	}
+	locks := make([]Lock, 0, len(*resp.Data))
+	for _, r := range *resp.Data {
 		locks = append(locks, r.lock())
 	}
 	return locks, nil

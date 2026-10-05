@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -28,6 +29,9 @@ func (i *Int) UnmarshalJSON(b []byte) error {
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return fmt.Errorf("loqed: invalid integer %q", s)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) || f < -(1<<63) || f >= 1<<63 {
+		return fmt.Errorf("loqed: integer %q out of range", s)
 	}
 	*i = Int(f)
 	return nil

@@ -70,6 +70,13 @@ func TestParseWebhookStateFromEventType(t *testing.T) {
 	}
 }
 
+func TestParseWebhookNumericKeyNameUser(t *testing.T) {
+	ev, err := cloud.ParseWebhook([]byte(`{"event_type":"STATE_CHANGED_LATCH","lock_id":"x","key_name_user":1234}`))
+	if err != nil || ev.KeyNameUser != "1234" {
+		t.Fatalf("%+v %v", ev, err)
+	}
+}
+
 func TestParseWebhookInvalid(t *testing.T) {
 	for _, body := range []string{`nope`, `{"online":1}`, `{"lock_id":"x"}`} {
 		if _, err := cloud.ParseWebhook([]byte(body)); !errors.Is(err, loqed.ErrInvalidPayload) {
