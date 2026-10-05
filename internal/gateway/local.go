@@ -63,21 +63,6 @@ func (s *Supervisor) status(ctx context.Context) (*bridge.Status, error) {
 	return s.bridge.Status(c)
 }
 
-func (s *Supervisor) applyStatus(now time.Time, st *bridge.Status) {
-	s.state.BoltState = st.BoltState
-	s.state.Lock = model.LockStateFor(st.BoltState)
-	s.state.BatteryPercentage = model.Ptr(int(st.BatteryPercentage))
-	s.state.BatteryVoltage = model.Ptr(float64(st.BatteryVoltage))
-	s.state.WifiStrength = model.Ptr(int(st.WifiStrength))
-	s.state.BLEStrength = model.Ptr(int(st.BLEStrength))
-	s.state.LockOnline = st.LockOnline == 1
-	s.state.StateStale = false
-	s.lastFreshAt = now
-	if st.BoltState == loqed.BoltUnknown {
-		s.lastUnknownCheck = now
-	}
-}
-
 // registerWebhook ensures our bridge webhook. On failure it schedules a
 // retry; an auth failure refreshes credentials first. It returns false if
 // the lock had to leave local mode (no usable bridge client).
@@ -119,18 +104,26 @@ func (s *Supervisor) ensureWebhook(ctx context.Context) error {
 	}
 	suffix := "/webhook/" + s.id
 	found := false
+	others := 0
 	for _, h := range hooks {
 		if h.URL == want {
 			found = true
 			continue
 		}
-		if u, perr := url.Parse(h.URL); perr == nil && strings.HasSuffix(u.Path, suffix) {
-			if err := s.bridge.DeleteWebhook(c, int(h.ID)); err != nil {
-				s.warn("could not delete a stale webhook", "webhook_id", int(h.ID), "err", err)
-			} else {
-				s.log.Info("deleted a stale webhook", "webhook_id", int(h.ID))
-			}
+		u, perr := url.Parse(h.URL)
+		if perr != nil || !strings.HasSuffix(u.Path, suffix) {
+			others++
+			continue
 		}
+		if err := s.bridge.DeleteWebhook(c, int(h.ID)); err != nil {
+			s.warn("could not delete a stale webhook", "webhook_id", int(h.ID), "err", err)
+		} else {
+			s.log.Info("deleted a stale webhook", "webhook_id", int(h.ID))
+		}
+	}
+	if others > maxOtherWebhooks {
+		s.warn("the bridge has many other webhooks; each webhook target delays events and /status, so remove the ones no longer used",
+			"other_webhooks", others)
 	}
 	if found {
 		return nil
@@ -151,8 +144,14 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 			s.confirmAt = time.Time{}
 			viaCloud := s.confirmViaCloud
 			s.confirmViaCloud = false
-			if !s.reconcile(ctx) && viaCloud {
+			ok := s.reconcile(ctx)
+			if !ok && viaCloud {
 				s.scheduleCloudConfirm(now, s.confirmTarget)
+			}
+			if ok && s.move.active && !s.confirmRechecked && s.mode == model.ModeLocal {
+				// Still unresolved: /status may lag; read once more.
+				s.confirmRechecked = true
+				s.confirmAt = s.d.Now().Add(s.t.StatusRecheck)
 			}
 			return s.mode == model.ModeLocal
 		},
@@ -301,9 +300,13 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 	switch e := ev.(type) {
 	case bridge.StateReachedEvent:
 		s.state.LockOnline = true
+		if !e.Jammed {
+			s.move = movement{}
+		}
 		s.onReached(now, e.BoltState, e.Jammed)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, "", model.FromStateReached(e.EventType), true)
 	case bridge.GoToStateEvent:
+		s.startMovement(now, e.GoToState)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, "", model.FromGoTo(e.GoToState, s.state.Lock), true)
 		if s.confirmAt.IsZero() {
 			s.awaitConfirm(now, e.GoToState) // STATE_CHANGED may be lost
@@ -328,8 +331,8 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 		}
 		if e.BLEStrength != nil {
 			s.state.BLEStrength = e.BLEStrength
-			s.state.LockOnline = *e.BLEStrength != -1
 		}
+		s.state.LockOnline = e.BLEStrength == nil || *e.BLEStrength != -1
 		s.publish()
 	}
 }

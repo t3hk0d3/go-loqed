@@ -38,9 +38,13 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 	switch e.Kind {
 	case cloud.KindStateReached:
 		s.state.LockOnline = true
+		if !e.Jammed {
+			s.move = movement{}
+		}
 		s.onReached(now, e.BoltState, e.Jammed)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType), false)
 	case cloud.KindGoToState:
+		s.startMovement(now, e.GoToState)
 		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock), false)
 	case cloud.KindSignal:
 		if e.BatteryPercentage != nil && *e.BatteryPercentage >= 0 {
@@ -51,7 +55,16 @@ func (s *Supervisor) onCloudEvent(_ context.Context, e cloud.WebhookEvent) {
 		}
 		if e.BLEStrength != nil {
 			s.state.BLEStrength = e.BLEStrength
+		}
+		// Any report from the lock itself means it is online again
+		// (online: 1 is not always sent after a recovery).
+		switch {
+		case e.BLEStrength != nil:
 			s.state.LockOnline = *e.BLEStrength != -1
+		case e.BatteryPercentage != nil:
+			s.state.LockOnline = *e.BatteryPercentage != -1
+		default:
+			s.state.LockOnline = true
 		}
 		s.publish()
 	case cloud.KindOnline:

@@ -115,11 +115,11 @@ func TestCommandPastDeadlineIsNotSentViaCloud(t *testing.T) {
 	}
 }
 
-func TestMissedWebhookTriggersStatusAfterTenSeconds(t *testing.T) {
+func TestMissedWebhookTriggersStatusAfterThirtySeconds(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.command(model.CommandLock)
-	h.run(9 * time.Second)
+	h.run(29 * time.Second)
 	if h.bridge.statusCalls != 1 {
 		t.Fatal("too early")
 	}

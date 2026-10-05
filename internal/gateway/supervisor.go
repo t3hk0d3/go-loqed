@@ -81,27 +81,31 @@ type Deps struct {
 }
 
 type Timing struct {
-	Liveness         time.Duration // bridge and cloud TCP probes
-	Reconcile        time.Duration // max interval between /status (local) or reconcile polls (cloud push)
-	OfflineRetry     time.Duration
-	UnknownRecheck   time.Duration
-	WebhookConfirm   time.Duration // /status if no matching webhook arrives
-	WebhookRetry     time.Duration // retry bridge webhook registration
-	CloudConfirm     time.Duration
-	CloudPoll        time.Duration // how often cloud mode asks the budget for a poll
-	CloudPollSpacing time.Duration // budget spacing of background polls (12h / cloud_budget)
-	StaleGrace       time.Duration
-	CommandMaxAge    time.Duration
-	EnrichWindow     time.Duration
-	RequestTimeout   time.Duration
-	FailureThreshold int
+	Liveness          time.Duration // bridge and cloud TCP probes
+	Reconcile         time.Duration // max interval between /status (local) or reconcile polls (cloud push)
+	OfflineRetry      time.Duration
+	UnknownRecheck    time.Duration
+	WebhookConfirm    time.Duration // /status if no matching webhook arrives
+	StatusRecheck     time.Duration // one more /status after an unresolved confirmation read
+	StatusEventWindow time.Duration // /status never overrides a bolt webhook this recent
+	StatusMoveWindow  time.Duration // a /status read this soon after a movement may still show the old state
+	WebhookRetry      time.Duration // retry bridge webhook registration
+	CloudConfirm      time.Duration
+	CloudPoll         time.Duration // how often cloud mode asks the budget for a poll
+	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
+	StaleGrace        time.Duration
+	CommandMaxAge     time.Duration
+	EnrichWindow      time.Duration
+	RequestTimeout    time.Duration
+	FailureThreshold  int
 }
 
 func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 	return Timing{
 		Liveness: liveness, Reconcile: reconcile,
 		OfflineRetry: 5 * time.Minute, UnknownRecheck: 10 * time.Minute,
-		WebhookConfirm: 10 * time.Second, WebhookRetry: 10 * time.Minute,
+		WebhookConfirm: 30 * time.Second, StatusRecheck: time.Minute, WebhookRetry: 10 * time.Minute,
+		StatusEventWindow: 5 * time.Minute, StatusMoveWindow: 3 * time.Minute,
 		CloudConfirm: 5 * time.Second, CloudPoll: time.Minute, CloudPollSpacing: pollSpacing,
 		StaleGrace:    10 * time.Minute,
 		CommandMaxAge: 10 * time.Second, EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
@@ -122,6 +126,10 @@ type recentEvent struct {
 }
 
 const warnRepeatWindow = 10 * time.Minute
+
+// maxOtherWebhooks: more webhook targets than this on a bridge noticeably
+// delay events and /status (the bridge delivers them one after another).
+const maxOtherWebhooks = 3
 
 type warnState struct {
 	last       time.Time
@@ -168,6 +176,9 @@ type Supervisor struct {
 	cloudConfirmAt    time.Time       // cloud confirmation poll at this time
 	cloudConfirmSince time.Time       // only data fetched after this counts
 	confirmRetried    bool            // the one extra confirmation poll was used
+	confirmRechecked  bool            // the one extra confirmation /status read was used
+	move              movement        // expected bolt movement (for /status hints)
+	lastBoltEventAt   time.Time       // last webhook that set the bolt state
 
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
@@ -341,6 +352,9 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, rawKey *int, c
 		s.state.StateStale = false
 		s.lastFreshAt = now
 	}
+	if t.SetBolt {
+		s.lastBoltEventAt = now
+	}
 	s.lastEventAt = now
 	key := rawKey
 	name := s.keyName(key, cloudKeyName)
@@ -377,6 +391,7 @@ func (s *Supervisor) awaitConfirm(now time.Time, target loqed.BoltState) {
 	s.confirmTarget = target
 	s.confirmAt = now.Add(s.t.WebhookConfirm)
 	s.confirmViaCloud = false
+	s.confirmRechecked = false
 }
 
 // scheduleCloudConfirm polls the cloud CloudConfirm after a cloud command,

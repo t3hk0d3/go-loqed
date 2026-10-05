@@ -174,7 +174,7 @@ func TestLostStateChangedAfterGoToTriggersStatus(t *testing.T) {
 	if h.lock() != "LOCKING" {
 		t.Fatalf("lock %s", h.lock())
 	}
-	h.run(9 * time.Second)
+	h.run(29 * time.Second)
 	if h.bridge.statusCalls != 1 {
 		t.Fatal("too early")
 	}
@@ -191,7 +191,7 @@ func TestMotorStallSchedulesStatus(t *testing.T) {
 	if h.lock() != "JAMMED" {
 		t.Fatalf("lock %s", h.lock())
 	}
-	h.run(11 * time.Second)
+	h.run(31 * time.Second)
 	if h.bridge.statusCalls != 2 || h.lock() != "UNLOCKED" {
 		t.Fatalf("status %d lock %s", h.bridge.statusCalls, h.lock())
 	}
