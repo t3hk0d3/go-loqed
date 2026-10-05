@@ -55,6 +55,11 @@ func (s *Supervisor) tickCloud(ctx context.Context, now time.Time) {
 			s.cloudProbeFailures = 0
 		}
 	}
+	// A reconcile-spaced poll scheduled while webhooks worked must not delay
+	// polling once they stop.
+	if !s.pushActive(now) && s.nextCloudPoll.After(now.Add(s.t.CloudPoll)) {
+		s.nextCloudPoll = now
+	}
 	if !now.Before(s.nextCloudPoll) {
 		s.nextCloudPoll = s.nextPollTime(now)
 		s.pollCloud(ctx, PriorityBackground, time.Time{})
@@ -128,6 +133,9 @@ func (s *Supervisor) probeCloud(ctx context.Context) error {
 // pollCloud reads the lock from the cloud. It returns true on fresh data.
 func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.Time) bool {
 	list, err := s.d.Cloud.Locks(ctx, p, notBefore)
+	if ctx.Err() != nil {
+		return false
+	}
 	switch {
 	case errors.Is(err, ErrDeferred):
 		return false // freshness tracking marks the state stale if this lasts

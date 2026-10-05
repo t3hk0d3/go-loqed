@@ -111,11 +111,11 @@ func TestOfflineRetriesForeverWithoutSpendingBudget(t *testing.T) {
 	for range 3 {
 		h.advance(time.Minute)
 	}
-	before, calls := len(h.probes), len(h.cloud.calls)
+	before, calls, cloudBefore := len(h.probes), len(h.cloud.calls), h.cloudProbes
 	for range 24 { // two hours
 		h.advance(5 * time.Minute)
 	}
-	if h.s.mode != model.ModeOffline || len(h.probes)-before != 24 || len(h.cloud.calls) != calls {
+	if h.s.mode != model.ModeOffline || len(h.probes)-before != 24 || len(h.cloud.calls) != calls || h.cloudProbes-cloudBefore != 24 {
 		t.Fatalf("mode %s probes %d cloud calls %d", h.s.mode, len(h.probes)-before, len(h.cloud.calls)-calls)
 	}
 }
@@ -198,5 +198,24 @@ func TestCloudOnlyLockStartsInCloud(t *testing.T) {
 	h.advance(60 * time.Second)
 	if len(h.probes) != 0 {
 		t.Fatal("cloud-only locks are never probed")
+	}
+}
+
+func TestPollingResumesWhenCloudWebhooksStop(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{}, func(d *Deps) { d.CloudWebhooks = true })
+	h.start()
+	h.toCloud()
+	h.s.lastCloudEventAt = h.now // a cloud webhook arrived
+	h.advance(2 * time.Minute)   // push active: next poll is a reconcile away
+	h.advance(time.Hour)
+	h.s.lastCloudEventAt = h.now // the last one, an hour later
+	lapse := h.s.lastCloudEventAt.Add(h.s.t.Reconcile)
+	for h.now.Before(lapse) {
+		h.advance(time.Minute)
+	}
+	calls := len(h.cloud.calls)
+	h.advance(2 * time.Minute)
+	if len(h.cloud.calls) == calls {
+		t.Fatal("no poll within CloudPoll after cloud webhooks stopped")
 	}
 }
