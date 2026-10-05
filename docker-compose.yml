@@ -1,0 +1,17 @@
+services:
+  loqed-mqtt:
+    image: ghcr.io/t3hk0d3/loqed-mqtt:latest
+    restart: unless-stopped
+    # Host networking makes the auto-detected webhook URL the real LAN
+    # address the bridge can reach. Without it, set LOQED_WEBHOOK__PRIVATE_URL.
+    network_mode: host
+    volumes:
+      - loqed-data:/data
+    environment:
+      LOQED_CLOUD_TOKEN: "paste-your-personal-access-token"
+      # or: LOQED_CLOUD_EMAIL / LOQED_CLOUD_PASSWORD
+      LOQED_MQTT__URL: "tcp://192.168.1.10:1883"
+      LOQED_MQTT__USERNAME: "loqed"
+      LOQED_MQTT__PASSWORD: "change-me"
+volumes:
+  loqed-data:
