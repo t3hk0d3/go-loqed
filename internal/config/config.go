@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -13,6 +14,18 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// decodeStrict decodes a node rejecting unknown fields; Node.Decode inside an
+// UnmarshalYAML method is not strict even when the outer decoder is.
+func decodeStrict(n *yaml.Node, out any) error {
+	b, err := yaml.Marshal(n)
+	if err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	return dec.Decode(out)
+}
 
 // Duration is a time.Duration written as "60s", "24h"; "0" or "" is zero.
 type Duration time.Duration
@@ -95,7 +108,7 @@ func (m *LockSettingsMap) UnmarshalYAML(n *yaml.Node) error {
 	switch n.Kind {
 	case yaml.MappingNode:
 		var raw map[string]LockSetting
-		if err := n.Decode(&raw); err != nil {
+		if err := decodeStrict(n, &raw); err != nil {
 			return err
 		}
 		for k, v := range raw {
@@ -106,7 +119,7 @@ func (m *LockSettingsMap) UnmarshalYAML(n *yaml.Node) error {
 			Lock        string `yaml:"lock"`
 			LockSetting `yaml:",inline"`
 		}
-		if err := n.Decode(&list); err != nil {
+		if err := decodeStrict(n, &list); err != nil {
 			return err
 		}
 		for _, e := range list {
@@ -156,13 +169,16 @@ func (k *KeyNames) UnmarshalYAML(n *yaml.Node) error {
 				continue
 			}
 			var e struct {
-				ID   int    `yaml:"id"`
+				ID   *int   `yaml:"id"`
 				Name string `yaml:"name"`
 			}
-			if err := item.Decode(&e); err != nil {
+			if err := decodeStrict(item, &e); err != nil {
 				return err
 			}
-			(*k)[e.ID] = e.Name
+			if e.ID == nil {
+				return errors.New("key_names entry needs an id")
+			}
+			(*k)[*e.ID] = e.Name
 		}
 	case yaml.ScalarNode:
 		if n.Tag == "!!null" {

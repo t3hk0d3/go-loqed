@@ -260,3 +260,25 @@ func TestResolveMQTT(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestUnknownKeysInsideLockSettingsFail(t *testing.T) {
+	cases := map[string]config.Sources{
+		"yaml map":      {ConfigFile: write(t, "c.yaml", "lock_settings: {Front: {bridge_ipp: 1.2.3.4}}\n")},
+		"options list":  {OptionsFile: write(t, "options.json", `{"lock_settings":[{"lock":"Front","bridge_ipp":"1.2.3.4"}]}`)},
+		"env":           {Environ: []string{`LOQED_LOCK_SETTINGS={"Front":{"bridge_ipp":"1.2.3.4"}}`}},
+		"key_names obj": {ConfigFile: write(t, "k.yaml", "lock_settings: {Front: {key_names: [{id: 1, nam: A}]}}\n")},
+	}
+	for name, src := range cases {
+		_, err := config.Load(src)
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("%s: expected unknown-field error, got %v", name, err)
+		}
+	}
+}
+
+func TestKeyNamesEntryWithoutIDFails(t *testing.T) {
+	src := config.Sources{ConfigFile: write(t, "c.yaml", "lock_settings: {Front: {key_names: [{name: Alice}]}}\n")}
+	if _, err := config.Load(src); err == nil || !strings.Contains(err.Error(), "id") {
+		t.Fatalf("expected error about id, got %v", err)
+	}
+}

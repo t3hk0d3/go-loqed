@@ -112,7 +112,12 @@ func setPath(v reflect.Value, path []string, raw string) error {
 // durations) are parsed as YAML/JSON.
 func setValue(v reflect.Value, raw string) error {
 	if v.Kind() == reflect.Map || reflect.PointerTo(v.Type()).Implements(unmarshalerType) {
-		return yaml.Unmarshal([]byte(raw), v.Addr().Interface())
+		dec := yaml.NewDecoder(strings.NewReader(raw))
+		dec.KnownFields(true)
+		if err := dec.Decode(v.Addr().Interface()); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		return nil
 	}
 	switch v.Kind() {
 	case reflect.String:
