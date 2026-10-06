@@ -5,7 +5,7 @@
 **Goal:** Accept LOQED cloud webhook bodies on a per-lock MQTT topic, so a Home Assistant automation with a Nabu Casa webhook trigger can feed cloud webhooks without a reverse proxy.
 
 **Architecture:**
-- First, `internal/hass` is split into `internal/mqtt` (MQTT client and the gateway's own topics) and `internal/mqtt/hass-discovery` (package `hassdiscovery`, Home Assistant discovery). The client gets discovery through a small interface, so the MQTT layer knows nothing about Home Assistant.
+- First, `internal/hass` is split into `internal/mqtt` (MQTT client and the gateway's own topics) and `internal/mqtt/hass` (Home Assistant discovery). The client gets discovery through a small interface, so the MQTT layer knows nothing about Home Assistant.
 - `internal/mqtt` subscribes to `<base>/+/cloud_webhook` when the feature is enabled. It filters out retained, unknown-lock and oversized messages, and hands the raw body plus the real lock id to the app over a channel.
 - The app forwards each body to one new gateway entry point, `Manager.DeliverCloudWebhook`. That function decodes and routes the body exactly as the HTTP `/cloud/<secret>/<lock-id>` route does. The HTTP route is refactored to call the same function, so both inputs share the binding rules.
 
@@ -29,7 +29,7 @@
 
 The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) together with `.golangci.yml` (golangci-lint v2.14.0; gofmt). Every task follows it. The rules that matter most here:
 
-- `internal/mqtt` is the only package that imports the MQTT library; it owns the gateway's `<base>/…` topics and knows nothing about Home Assistant. `internal/mqtt/hass-discovery` (package `hassdiscovery`) owns discovery documents, the discovery topic and HA's birth topic; it imports `internal/mqtt`, never the MQTT library. `internal/gateway` is the only package that knows lock modes and the cloud-id binding. `internal/app` only wires them together.
+- `internal/mqtt` is the only package that imports the MQTT library; it owns the gateway's `<base>/…` topics and knows nothing about Home Assistant. `internal/mqtt/hass` owns discovery documents, the discovery topic and HA's birth topic; it imports `internal/mqtt`, never the MQTT library. `internal/gateway` is the only package that knows lock modes and the cloud-id binding. `internal/app` only wires them together.
 - Errors are wrapped with `%w` around existing sentinels: `loqed.ErrInvalidPayload`, `gateway.ErrUnknownLock`, `gateway.ErrCloudIDMismatch` and `gateway.ErrBusy`. Callers branch with `errors.Is`.
 - Cloud webhook bodies are never logged, at any level. Log lines carry `lock_id`, the topic and, for a mismatch, the numeric `cloud_lock_id`, and nothing else from the payload.
 - Tests:
@@ -73,7 +73,7 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 | File | Change |
 |---|---|
 | `internal/hass/*` → `internal/mqtt/*` | client, topics and their tests move; package `mqtt`; paho imported as `paho` |
-| `internal/mqtt/hass-discovery/` (package `hassdiscovery`) | discovery payload, discovery topic, HA birth topic, golden file and tests move here |
+| `internal/mqtt/hass/` | discovery payload, discovery topic, HA birth topic, golden file and tests move here |
 | `internal/app/app.go`, `CLAUDE.md` | imports, wiring of the discovery implementation, layout and `-update` command |
 | `internal/gateway/manager.go` | add `DeliverCloudWebhook(lockID string, body []byte) (cloud.WebhookEvent, error)` (decode + bind + deliver); `DeliverCloudEvent` stays as the typed entry point it calls |
 | `internal/gateway/manager_test.go` | tests for `DeliverCloudWebhook` |
@@ -91,30 +91,30 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 
 ---
 
-### Task 1: Split `internal/hass` into `internal/mqtt` and `internal/mqtt/hass-discovery`
+### Task 1: Split `internal/hass` into `internal/mqtt` and `internal/mqtt/hass`
 
 **Files:**
 - Move: `internal/hass/client.go`, `client_test.go`, `topics.go` → `internal/mqtt/` (package `mqtt`; the paho import is aliased `paho` to avoid confusion with the package name)
-- Move: `internal/hass/discovery.go`, `discovery_test.go`, `testdata/discovery_lock1.golden.json` → `internal/mqtt/hass-discovery/` (package `hassdiscovery`)
+- Move: `internal/hass/discovery.go`, `discovery_test.go`, `testdata/discovery_lock1.golden.json` → `internal/mqtt/hass/`
 - Modify: `internal/app/app.go`, `internal/app/app_test.go`, `CLAUDE.md` (layout table, dependency rule, golden `-update` command)
 - Delete: `internal/hass/`
 
 **Interfaces:**
-- Consumes: the current `hass` API (`Client`, `ClientConfig`, `Topics`, `TopicID`, `LockInfo`, `DiscoveryPayload`).
+- Consumes: the current `internal/hass` API (`Client`, `ClientConfig`, `Topics`, `TopicID`, `LockInfo`, `DiscoveryPayload`).
 - Produces, in `internal/mqtt`:
   - `Client`, `ClientConfig`, `Command`, `LockInfo`, `TopicID`, unchanged apart from the package name;
   - `Topics{Base string}` without `DiscoveryPrefix`, `Discovery()` or `HAStatus()`;
   - `type Discovery interface { BirthTopic() string; Topic(lockID string) string; Payload(l LockInfo) ([]byte, error) }`;
   - `ClientConfig.Discovery Discovery` replaces `ClientConfig.HAEnabled`: nil means Home Assistant is off.
-- Produces, in `internal/mqtt/hass-discovery` (package `hassdiscovery`):
+- Produces, in `internal/mqtt/hass`:
   - `func New(prefix string, topics mqtt.Topics, version string) *Discovery`;
   - `*Discovery` implements `mqtt.Discovery`. The discovery topic, the birth topic and the payload are identical to today's.
-- `internal/app` builds `hassdiscovery.New(...)` only when `homeassistant.enabled` is true and passes it as `ClientConfig.Discovery`.
+- `internal/app` builds `hass.New(...)` only when `homeassistant.enabled` is true and passes it as `ClientConfig.Discovery`.
 
 **BDD skeleton**
 
 ```
-hassdiscovery.Discovery
+hass.Discovery
     Topic
         - returns "<prefix>/device/loqed_<topic id>/config" (same as before the split)
     BirthTopic
@@ -137,21 +137,21 @@ mqtt.Client
 
 Package boundaries
     - only internal/mqtt imports github.com/eclipse/paho.mqtt.golang
-    - internal/mqtt imports nothing from internal/mqtt/hass-discovery
+    - internal/mqtt imports nothing from internal/mqtt/hass
 ```
 
 - [ ] **Step 1:** Move the files with `git mv` (keeps history), rename the packages and fix imports. Run `go build ./...`. Expected: success.
 - [ ] **Step 2:** Write the new tests from the skeleton:
   - the `Discovery`-nil client tests, replacing the `HAEnabled=false` ones;
-  - the topic tests in `hassdiscovery`;
-  - a boundary test that fails if a package other than `internal/mqtt` imports paho, or if `internal/mqtt` imports `hass-discovery`. It uses `go list -deps -json` or `go/build`.
+  - the topic tests in `hass`;
+  - a boundary test that fails if a package other than `internal/mqtt` imports paho, or if `internal/mqtt` imports `hass`. It uses `go list -deps -json` or `go/build`.
 - [ ] **Step 3:** Run `go test ./internal/mqtt/... ./internal/app`. Expected: FAIL on the new tests only.
-- [ ] **Step 4:** Introduce the `mqtt.Discovery` interface and implement it in `hassdiscovery`. Move the discovery-topic and birth-topic knowledge out of `Topics`, and wire it in `internal/app`.
+- [ ] **Step 4:** Introduce the `mqtt.Discovery` interface and implement it in `hass`. Move the discovery-topic and birth-topic knowledge out of `Topics`, and wire it in `internal/app`.
 - [ ] **Step 5:** Run `gofmt -l .`, `go vet ./...`, `go test -race ./...`, `go test -race -count=8 ./internal/mqtt/...` and golangci-lint. Expected: all clean. The golden file has no diff.
 - [ ] **Step 6:** Update `CLAUDE.md`:
   - the layout table;
-  - the dependency rule (`internal/mqtt` is the only importer of the MQTT library; `hass-discovery` holds everything HA specific);
-  - the `-update` command, which becomes `go test ./internal/mqtt/hass-discovery -run TestDiscoveryPayload -update`.
+  - the dependency rule (`internal/mqtt` is the only importer of the MQTT library; `hass` holds everything HA specific);
+  - the `-update` command, which becomes `go test ./internal/mqtt/hass -run TestDiscoveryPayload -update`.
 - [ ] **Step 7:** Commit with the message `mqtt: split MQTT client from Home Assistant discovery`.
 
 ### Task 2: Gateway — one decode-and-route path for cloud webhooks
@@ -377,7 +377,7 @@ BDD skeleton skipped: a manual verification on real hardware. The steps and the 
 | 5.4 step 6 topic log | 4 |
 | 5.7 dedup across MQTT, bridge and redelivery | 4 (existing dedup, tested end to end) |
 | 9 DOCS recipe, trust note | 5 |
-| 3 package layout (`internal/mqtt`, `internal/mqtt/hass-discovery`) | 1 |
+| 3 package layout (`internal/mqtt`, `internal/mqtt/hass`) | 1 |
 | 10 fixtures in real shapes | done in `31d7e70` |
 | 10 mqtt retained/disabled tests | 3 |
 | V10 | 6 |
