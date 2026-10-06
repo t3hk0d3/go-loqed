@@ -18,8 +18,8 @@
   key or person last used the lock, and Wi-Fi, battery and connection details
   the core integration doesn't expose.
 - **Set up once.** A new bridge IP or new keys are picked up automatically,
-  the access token renews itself, and one instance covers every lock on the
-  account.
+  the access token renews itself (with email and password set), and one
+  instance covers every lock on the account.
 - **Local and independent.** Bridge events stay on your network, even with
   Home Assistant Cloud, and any MQTT client can use the locks. The gateway
   keeps tracking them while Home Assistant restarts.
