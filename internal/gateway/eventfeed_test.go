@@ -76,6 +76,17 @@ func TestOnlyTheLatestEventIsCompared(t *testing.T) {
 	}
 }
 
+func TestDedupCanBeDisabled(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.s.t.DuplicateWindow = 0
+	h.start()
+	h.send(cloudGoTo("", model.Ptr(3)))
+	h.send(bridgeGoTo(model.Ptr(3)))
+	if len(h.pub.events) != 2 {
+		t.Fatalf("every delivery must be published: %+v", h.pub.events)
+	}
+}
+
 func TestDedupWindowIsConfigurable(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.s.t.DuplicateWindow = 2 * time.Second

@@ -67,7 +67,7 @@ func TestAddonOptionsAndSchemaMatchConfig(t *testing.T) {
 
 func sampleFor(key string) any {
 	switch key {
-	case "enabled":
+	case "enabled", "event_dedup_enabled":
 		return true
 	case "cloud_budget":
 		return 10

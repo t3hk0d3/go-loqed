@@ -19,6 +19,9 @@ type lockEvent struct {
 // DuplicateWindow. Otherwise the event becomes the latest one. Only the
 // latest event is compared, by design (no list of recent events).
 func (s *Supervisor) isDuplicate(eventType string, key *int, now time.Time) bool {
+	if s.t.DuplicateWindow <= 0 {
+		return false // deduplication disabled (event_dedup_enabled: false)
+	}
 	et := strings.ToUpper(eventType)
 	if l := s.lastLockEvent; l != nil && l.eventType == et && sameKey(l.key, key) && now.Sub(l.at) <= s.t.DuplicateWindow {
 		return true

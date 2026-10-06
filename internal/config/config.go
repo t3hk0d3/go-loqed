@@ -60,6 +60,7 @@ type Config struct {
 	CacheMaxAge       Duration        `yaml:"cache_max_age"`
 	ReconcileInterval Duration        `yaml:"reconcile_interval"`
 	LivenessInterval  Duration        `yaml:"liveness_interval"`
+	EventDedupEnabled bool            `yaml:"event_dedup_enabled"`
 	EventDedupWindow  Duration        `yaml:"event_dedup_window"`
 	CloudBudget       int             `yaml:"cloud_budget"`
 	Webhook           Webhook         `yaml:"webhook"`
@@ -219,6 +220,7 @@ func Defaults() Config {
 		CachePath:         "/data/locks.json",
 		ReconcileInterval: Duration(24 * time.Hour),
 		LivenessInterval:  Duration(60 * time.Second),
+		EventDedupEnabled: true,
 		EventDedupWindow:  Duration(10 * time.Second),
 		CloudBudget:       10,
 		Webhook:           Webhook{Listen: ":8099"},

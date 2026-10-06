@@ -29,7 +29,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.CachePath != "/data/locks.json" || cfg.ReconcileInterval.D() != 24*time.Hour || cfg.LivenessInterval.D() != time.Minute ||
-		cfg.EventDedupWindow.D() != 10*time.Second || cfg.CloudBudget != 10 || cfg.Webhook.Listen != ":8099" || cfg.MQTT.ClientID != "loqed-mqtt" || cfg.MQTT.BaseTopic != "loqed" ||
+		!cfg.EventDedupEnabled || cfg.EventDedupWindow.D() != 10*time.Second || cfg.CloudBudget != 10 || cfg.Webhook.Listen != ":8099" || cfg.MQTT.ClientID != "loqed-mqtt" || cfg.MQTT.BaseTopic != "loqed" ||
 		!cfg.HomeAssistant.Enabled || cfg.HomeAssistant.DiscoveryPrefix != "homeassistant" || cfg.LogLevel != "info" {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
@@ -39,13 +39,13 @@ func TestPrecedenceOptionsThenYAMLThenEnv(t *testing.T) {
 	opts := write(t, "options.json", `{"cloud_token":"from-options","mqtt":{"base_topic":"opt","url":"tcp://opt:1883"},"cloud_budget":5}`)
 	yml := write(t, "config.yaml", "mqtt:\n  base_topic: yaml\nliveness_interval: 30s\nevent_dedup_window: 5s\n")
 	cfg, err := config.Load(config.Sources{OptionsFile: opts, ConfigFile: yml, Environ: []string{
-		"LOQED_MQTT__BASE_TOPIC=env", "LOQED_CLOUD_BUDGET=7", "LOQED_HOMEASSISTANT__ENABLED=false", "PATH=/bin",
+		"LOQED_MQTT__BASE_TOPIC=env", "LOQED_CLOUD_BUDGET=7", "LOQED_EVENT_DEDUP_ENABLED=false", "LOQED_HOMEASSISTANT__ENABLED=false", "PATH=/bin",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.CloudToken != "from-options" || cfg.MQTT.URL != "tcp://opt:1883" || cfg.MQTT.BaseTopic != "env" ||
-		cfg.LivenessInterval.D() != 30*time.Second || cfg.EventDedupWindow.D() != 5*time.Second || cfg.CloudBudget != 7 || cfg.HomeAssistant.Enabled {
+		cfg.LivenessInterval.D() != 30*time.Second || cfg.EventDedupWindow.D() != 5*time.Second || cfg.EventDedupEnabled || cfg.CloudBudget != 7 || cfg.HomeAssistant.Enabled {
 		t.Fatalf("unexpected: %+v", cfg)
 	}
 }

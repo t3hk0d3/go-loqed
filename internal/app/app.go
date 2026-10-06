@@ -176,6 +176,9 @@ func Run(ctx context.Context, o Options) error {
 	}
 	timing := gateway.DefaultTiming(cfg.LivenessInterval.D(), cfg.ReconcileInterval.D(), budget.Spacing())
 	timing.DuplicateWindow = cfg.EventDedupWindow.D()
+	if !cfg.EventDedupEnabled {
+		timing.DuplicateWindow = 0 // every delivery is published
+	}
 	if o.Timing != nil {
 		o.Timing(&timing)
 	}

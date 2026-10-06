@@ -14,6 +14,9 @@ configuration:
   lock_settings:
     name: Lock settings
     description: Per-lock overrides (edit in YAML mode). key_names looks like "1=Alice,3=Bob".
+  event_dedup_enabled:
+    name: Deduplicate lock events
+    description: Drop a lock event that repeats the previous one within the deduplication window (bridge and cloud copies, cloud re-deliveries). On by default.
   event_dedup_window:
     name: Event deduplication window
     description: A lock event repeating the previous one (bridge and cloud copies, cloud re-deliveries) within this time is dropped. Default 10s, at most 30s.

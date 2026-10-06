@@ -105,7 +105,7 @@ type Timing struct {
 	CloudPoll         time.Duration // how often cloud mode asks the budget for a poll
 	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
 	StaleGrace        time.Duration
-	DuplicateWindow   time.Duration // a repeat of the latest event within this is a duplicate (event_dedup_window)
+	DuplicateWindow   time.Duration // a repeat of the latest event within this is a duplicate (event_dedup_window); 0 = off
 	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
 	CommandDeadline   time.Duration // LOCK/UNLOCK: no attempt starts later than this after arrival
 	OpenDeadline      time.Duration // OPEN: same

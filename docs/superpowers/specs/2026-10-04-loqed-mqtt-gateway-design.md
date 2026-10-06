@@ -245,6 +245,7 @@ cache_path: /data/locks.json
 cache_max_age: 0             # 0 = never expire by age (checked at startup and hourly at runtime)
 reconcile_interval: 24h      # max interval between /status reconciles in local mode
 liveness_interval: 60s       # TCP probe interval in local mode
+event_dedup_enabled: true    # false = publish every delivery (bridge and cloud copies, cloud re-deliveries)
 event_dedup_window: 10s      # drop an event repeating the latest one (same event_type and key, any feed) within this; max 30s
 cloud_budget: 10             # max /api/locks/ calls per rolling 12h (account-wide)
 webhook:
@@ -384,7 +385,7 @@ The gateway is a faithful bridge: every state change the lock reports is publish
 
 Event sources by mode:
 - `local`: bridge and cloud webhooks, as equal feeds. Whichever copy of an event arrives first is applied and published (cloud copies usually arrive first).
-- Deduplication (revised 2026-10-06): an event with the same `event_type` and key as the **latest** received lock event, from either feed, within `event_dedup_window` (default 10 s, max 30 s) is dropped. Only the latest event is compared. A dropped cloud copy may still add `key_name` to the state document (no second event).
+- Deduplication (revised 2026-10-06): an event with the same `event_type` and key as the **latest** received lock event, from either feed, within `event_dedup_window` (default 10 s, max 30 s) is dropped, unless `event_dedup_enabled` is false. Only the latest event is compared. A dropped cloud copy may still add `key_name` to the state document (no second event).
 - `cloud`: cloud webhooks, if configured.
 - Never from polling: no synthetic events from `/status` or `ListLocks` results. Event delivery is best-effort (webhooks can be lost); documentation states that automations about *whether* the door is locked must use the lock entity.
 
