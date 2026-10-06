@@ -106,6 +106,7 @@ type Timing struct {
 	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
 	StaleGrace        time.Duration
 	DuplicateWindow   time.Duration // a repeat of the latest event within this is a duplicate (event_dedup_window); 0 = off
+	PairingWindow     time.Duration // the other feed's copy of a published event is recognized this long
 	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
 	CommandDeadline   time.Duration // LOCK/UNLOCK: no attempt starts later than this after arrival
 	OpenDeadline      time.Duration // OPEN: same
@@ -124,7 +125,7 @@ func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 		StatusEventWindow: 5 * time.Minute, StatusMoveWindow: 3 * time.Minute,
 		CloudConfirm: 5 * time.Second, CloudPoll: time.Minute, CloudPollSpacing: pollSpacing,
 		StaleGrace:      10 * time.Minute,
-		DuplicateWindow: 10 * time.Second, GatewayWindow: time.Minute,
+		DuplicateWindow: 10 * time.Second, PairingWindow: 5 * time.Minute, GatewayWindow: time.Minute,
 		CommandDeadline: 30 * time.Second, OpenDeadline: 10 * time.Second,
 		LocalCutoff: 10 * time.Second, OpenLocalCutoff: 3 * time.Second, AlreadyThere: 5 * time.Second,
 		RequestTimeout:   5 * time.Second,
@@ -198,7 +199,7 @@ type Supervisor struct {
 	lastPollAt       time.Time // last successful cloud poll
 	lastCloudEventAt time.Time
 
-	published         []*lockEvent // lock events published within DuplicateWindow (duplicate drop)
+	published         []*lockEvent // lock events published within DuplicateWindow or PairingWindow (duplicate drop)
 	lastCommandSentAt time.Time    // last gateway command written to the bridge or cloud
 
 	warned map[string]*warnState

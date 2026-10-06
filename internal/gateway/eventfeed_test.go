@@ -92,10 +92,12 @@ func TestDedupWindowIsConfigurable(t *testing.T) {
 	h.s.t.DuplicateWindow = 2 * time.Second
 	h.start()
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
+	h.advance(1 * time.Second)
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
 	h.advance(3 * time.Second)
-	h.send(cloudReached(""))
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
 	if len(h.pub.events) != 2 {
-		t.Fatalf("a repeat outside the window is a new event: %+v", h.pub.events)
+		t.Fatalf("a repeat within the window is dropped, one outside it is a new event: %+v", h.pub.events)
 	}
 }
 
@@ -233,4 +235,121 @@ func TestRepeatsAreDroppedButChangesBackArePublished(t *testing.T) {
 func mustReached(eventType string) loqed.BoltState {
 	b, _ := loqed.ReachedState(eventType)
 	return b
+}
+
+// Bolt-state events without a key, from either feed.
+func viaCloud(eventType string) CloudEventMsg {
+	return CloudEventMsg{Event: cloud.WebhookEvent{Kind: cloud.KindStateReached, EventType: eventType, BoltState: mustReached(eventType)}}
+}
+
+func viaBridge(eventType string) BridgeEventMsg { return reached(eventType, nil) }
+
+func (h *harness) eventTypes() []model.EventType {
+	var got []model.EventType
+	for _, e := range h.pub.events {
+		got = append(got, e.EventType)
+	}
+	return got
+}
+
+func TestLateCopyAfterDedupWindowIsDropped(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+	h.advance(2 * time.Minute)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+	if len(h.pub.events) != 1 || h.lock() != "LOCKED" {
+		t.Fatalf("events %v lock %s", h.eventTypes(), h.lock())
+	}
+}
+
+func TestPairingAbsorbsOnlyOneCopy(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+	h.advance(2 * time.Minute)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK")) // its copy
+	h.advance(time.Minute)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK")) // a new event
+	if len(h.pub.events) != 2 {
+		t.Fatalf("events %v", h.eventTypes())
+	}
+}
+
+func TestSameFeedRepeatAfterWindowIsPublished(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+	h.advance(30 * time.Second)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+	if len(h.pub.events) != 2 {
+		t.Fatalf("events %v", h.eventTypes())
+	}
+}
+
+func TestCopyAfterPairingWindowIsPublished(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+	h.advance(6 * time.Minute)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+	if len(h.pub.events) != 2 {
+		t.Fatalf("events %v", h.eventTypes())
+	}
+}
+
+// The bridge lags by minutes: its copies must not roll the state back.
+func TestInterleavedLateFeedIsDropped(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(viaCloud("STATE_CHANGED_LATCH"))
+	h.advance(30 * time.Second)
+	h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+	h.advance(90 * time.Second)
+	h.send(viaBridge("STATE_CHANGED_LATCH"))
+	h.advance(time.Second)
+	h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+	want := []model.EventType{model.EventUnlocked, model.EventLocked}
+	if !slices.Equal(h.eventTypes(), want) || h.lock() != "LOCKED" {
+		t.Fatalf("events %v lock %s", h.eventTypes(), h.lock())
+	}
+}
+
+// Day's bridge copy is lost; both feeds deliver night; then a real day
+// reaches the bridge first. Once the bridge delivered night, the old cloud
+// day can no longer be paired, so the real day is published.
+func TestPairingWindowNeverDropsARealChangeBack(t *testing.T) {
+	for _, bridgeFirst := range []bool{false, true} {
+		h := newHarness(t, testRecord(), config.LockSetting{})
+		h.start()
+		h.send(viaCloud("STATE_CHANGED_LATCH"))
+		h.advance(30 * time.Second)
+		if bridgeFirst {
+			h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+			h.advance(300 * time.Millisecond)
+			h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+		} else {
+			h.send(viaCloud("STATE_CHANGED_NIGHT_LOCK"))
+			h.advance(300 * time.Millisecond)
+			h.send(viaBridge("STATE_CHANGED_NIGHT_LOCK"))
+		}
+		h.advance(2 * time.Minute)
+		h.send(viaBridge("STATE_CHANGED_LATCH"))
+		want := []model.EventType{model.EventUnlocked, model.EventLocked, model.EventUnlocked}
+		if !slices.Equal(h.eventTypes(), want) || h.lock() != "UNLOCKED" {
+			t.Fatalf("bridgeFirst=%v: events %v lock %s", bridgeFirst, h.eventTypes(), h.lock())
+		}
+	}
+}
+
+func TestSingleFeedChangesBackArePublished(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	for _, et := range []string{"STATE_CHANGED_LATCH", "STATE_CHANGED_NIGHT_LOCK", "STATE_CHANGED_LATCH", "STATE_CHANGED_NIGHT_LOCK"} {
+		h.send(viaBridge(et))
+		h.advance(time.Minute)
+	}
+	if len(h.pub.events) != 4 {
+		t.Fatalf("events %v", h.eventTypes())
+	}
 }
