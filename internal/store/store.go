@@ -205,6 +205,12 @@ func (s *Store) Update(fn func(*Cache)) error {
 	return nil
 }
 
+// CheckWritable writes the current cache back to disk. At startup it proves
+// that the budget, a minted token and learned data will survive a restart.
+func (s *Store) CheckWritable() error {
+	return s.Update(func(*Cache) {})
+}
+
 // InstallID returns this installation's stable random id, creating and
 // persisting it on first use. It names minted tokens.
 func (s *Store) InstallID() (string, error) {

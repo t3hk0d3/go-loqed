@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,5 +162,68 @@ func TestFromCloud(t *testing.T) {
 		BridgeMacWifi: "mac", LocalID: &id, KeySecret: "k", BridgeKey: "b", BackendKey: "bk"})
 	if r.ID != "x" || r.ModelName != "m" || *r.LocalID != 2 || r.BackendKey != "bk" || r.BridgeMacWifi != "mac" {
 		t.Fatalf("%+v", r)
+	}
+}
+
+func TestCheckWritableKeepsLoadedCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locks.json")
+	st, _, _ := store.Open(path)
+	if err := st.Update(func(c *store.Cache) { c.CloudSecret = "s"; c.InstallID = "abcd1234" }); err != nil {
+		t.Fatal(err)
+	}
+	loaded, status, _ := store.Open(path)
+	if status != store.StatusLoaded {
+		t.Fatalf("status %v", status)
+	}
+	if err := loaded.CheckWritable(); err != nil {
+		t.Fatalf("CheckWritable: %v", err)
+	}
+	again, _, _ := store.Open(path)
+	if c := again.Snapshot(); c.CloudSecret != "s" || c.InstallID != "abcd1234" {
+		t.Fatalf("cache changed on disk: %+v", c)
+	}
+}
+
+func TestCheckWritableCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locks.json")
+	st, _, _ := store.Open(path)
+	if err := st.CheckWritable(); err != nil {
+		t.Fatalf("CheckWritable: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+}
+
+func TestCheckWritableReadOnlyDirectory(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "locks.json")
+		st, _, _ := store.Open(path)
+		if existing {
+			if err := st.Update(func(c *store.Cache) { c.CloudSecret = "s" }); err != nil {
+				t.Fatal(err)
+			}
+			st, _, _ = store.Open(path)
+		}
+		before := st.Snapshot()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		err := st.CheckWritable()
+		if !errors.Is(err, store.ErrWrite) || !strings.Contains(err.Error(), path) {
+			t.Fatalf("existing=%v: got %v", existing, err)
+		}
+		if after := st.Snapshot(); after.CloudSecret != before.CloudSecret || after.InstallID != before.InstallID {
+			t.Fatalf("existing=%v: snapshot changed", existing)
+		}
 	}
 }

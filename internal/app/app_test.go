@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -517,5 +518,115 @@ func TestEndToEndUnverifiedCommandFailsWithoutConfirmation(t *testing.T) {
 	_, actions := fb.snapshot()
 	if len(actions) != 0 {
 		t.Fatalf("the lock must not act on a bad signature: %v", actions)
+	}
+}
+
+// countingServer answers every request with 500 and counts them.
+func countingServer(t *testing.T, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// readOnlyDir makes dir unwritable for the rest of the test.
+func readOnlyDir(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+}
+
+func TestUnwritableCacheFailsBeforeAnyCloudCall(t *testing.T) {
+	var cloudCalls, portalCalls atomic.Int32
+	cloudSrv, portalSrv := countingServer(t, &cloudCalls), countingServer(t, &portalCalls)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "locks.json")
+	cfg := baseConfig(path, "tcp://127.0.0.1:1")
+	cfg.CloudToken, cfg.CloudEmail, cfg.CloudPassword = "", "user@example.com", "pw" // a mint would be attempted
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyDir(t, dir)
+	err := app.Run(context.Background(), app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler),
+		CloudBaseURL: cloudSrv.URL, PortalBaseURL: portalSrv.URL})
+	if !errors.Is(err, store.ErrWrite) || !strings.Contains(err.Error(), path) {
+		t.Fatalf("got %v", err)
+	}
+	if c, p := cloudCalls.Load(), portalCalls.Load(); c != 0 || p != 0 {
+		t.Fatalf("cloud calls %d, portal calls %d before failing", c, p)
+	}
+}
+
+func TestUnwritableExistingCacheFailsBeforeAnyCloudCall(t *testing.T) {
+	var cloudCalls atomic.Int32
+	cloudSrv := countingServer(t, &cloudCalls)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "locks.json")
+	st, _, _ := store.Open(path)
+	if _, err := st.InstallID(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig(path, "tcp://127.0.0.1:1")
+	readOnlyDir(t, dir)
+	err := app.Run(context.Background(), app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler), CloudBaseURL: cloudSrv.URL})
+	if !errors.Is(err, store.ErrWrite) || !strings.Contains(err.Error(), path) {
+		t.Fatalf("got %v", err)
+	}
+	if c := cloudCalls.Load(); c != 0 {
+		t.Fatalf("%d cloud calls before failing", c)
+	}
+}
+
+// The writability check must not mistake an unreadable cache for an
+// unwritable one: a corrupt file is rebuilt from the cloud.
+func TestCorruptCacheInWritableDirectoryStillStarts(t *testing.T) {
+	broker := testutil.StartBroker(t)
+	bridgeSrv := httptest.NewServer(&fakeBridge{bolt: "day_lock"})
+	defer bridgeSrv.Close()
+	var calls atomic.Int32
+	cloudSrv := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	path := filepath.Join(t.TempDir(), "locks.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start(t, baseConfig(path, broker), cloudSrv.URL)
+	if st, status, _ := store.Open(path); status != store.StatusLoaded || len(st.Snapshot().Locks) != 1 {
+		t.Fatalf("cache not rebuilt: status %v", status)
+	}
+}
+
+func TestCloudSecretIsSavedBeforeFirstCloudCall(t *testing.T) {
+	broker := testutil.StartBroker(t)
+	bridgeSrv := httptest.NewServer(&fakeBridge{bolt: "day_lock"})
+	defer bridgeSrv.Close()
+	var calls atomic.Int32
+	full := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	path := filepath.Join(t.TempDir(), "locks.json")
+	var first sync.Once
+	var secretFirst atomic.Bool
+	cloudSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first.Do(func() {
+			st, _, _ := store.Open(path)
+			secretFirst.Store(st.Snapshot().CloudSecret != "")
+		})
+		full.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer cloudSrv.Close()
+	cfg := baseConfig(path, broker)
+	cfg.Webhook.PublicURL = "https://gw.example.com"
+	start(t, cfg, cloudSrv.URL)
+	if calls.Load() == 0 {
+		t.Fatal("no cloud call made")
+	}
+	if !secretFirst.Load() {
+		t.Fatal("the cloud webhook secret was not saved before the first cloud call")
 	}
 }

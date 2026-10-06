@@ -73,10 +73,22 @@ func Run(ctx context.Context, o Options) error {
 	case store.StatusUnknownVersion:
 		log.Warn("the credential cache was written by another version; rebuilding it from the cloud", "path", cfg.CachePath)
 	}
+	// Without a writable cache the budget, a minted token and learned data
+	// would not survive a restart, so a restart loop could exceed LOQED's
+	// limit and add a lock key per mint: stop before any cloud call.
+	if err := st.CheckWritable(); err != nil {
+		return fmt.Errorf("the credential cache cannot be written; fix the permissions of its directory: %w", err)
+	}
 	before := st.Snapshot()
 	installID, err := st.InstallID()
 	if err != nil {
-		log.Error("cannot write the credential cache; running from memory", "err", err)
+		return fmt.Errorf("the credential cache cannot be written; fix the permissions of its directory: %w", err)
+	}
+	cloudSecret := ""
+	if cfg.Webhook.PublicURL != "" {
+		if cloudSecret, err = ensureCloudSecret(cfg, st); err != nil {
+			return err
+		}
 	}
 
 	var minter auth.Minter
@@ -111,13 +123,6 @@ func Run(ctx context.Context, o Options) error {
 	}
 	if len(selected) == 0 {
 		return errors.New("no locks to manage: the account has no locks, or the locks allow-list matches none")
-	}
-
-	cloudSecret := ""
-	if cfg.Webhook.PublicURL != "" {
-		if cloudSecret, err = ensureCloudSecret(cfg, st); err != nil {
-			return err
-		}
 	}
 
 	ln, err := net.Listen("tcp", cfg.Webhook.Listen)
