@@ -315,7 +315,7 @@ func (p *commandPipeline) sent(now time.Time, a *command, via model.Via) {
 	s.lastEventAt = now
 	if via == model.ViaLocal {
 		s.awaitConfirm(now, a.target())
-		s.bridgeCheckSince, s.bridgeCheckAt = now, now.Add(s.t.WebhookConfirm)
+		s.bridgeCheckSince, s.bridgeCheckAt, s.bridgeCheckCmd = now, now.Add(s.t.WebhookConfirm), a
 	} else {
 		s.scheduleCloudConfirm(now, a.target())
 	}
@@ -455,7 +455,8 @@ func (p *commandPipeline) resolved(ctx context.Context, a *command) {
 	}
 	if a.failoverAfter {
 		a.failoverAfter = false
-		if p.s.mode == model.ModeLocal {
+		// A bridge webhook meanwhile reset the count: the bridge is alive.
+		if p.s.mode == model.ModeLocal && p.s.httpFailures >= p.s.t.FailureThreshold {
 			p.s.localUnreachable(ctx, a.lastLocalErr)
 		}
 	}

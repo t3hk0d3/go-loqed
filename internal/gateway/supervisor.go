@@ -190,6 +190,7 @@ type Supervisor struct {
 	nextUnconfirmedRead time.Time // /status while delivery is unconfirmed
 	bridgeCheckAt       time.Time // a bridge-sent command's confirmation window ends
 	bridgeCheckSince    time.Time // ... and needs a bridge webhook since this
+	bridgeCheckCmd      *command  // ... if it was confirmed (by any feed)
 
 	// Command / movement confirmation.
 	confirmTarget     loqed.BoltState // BoltUnknown: any reached state confirms

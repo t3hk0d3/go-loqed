@@ -280,3 +280,36 @@ func TestUnconfirmedWarningIsRateLimited(t *testing.T) {
 		t.Fatalf("%d warnings:\n%s", n, out)
 	}
 }
+
+// Final review I-1: /status lags webhooks, and cloud copies usually arrive
+// first. A lagging read is not a missed change.
+func TestLaggingStatusAfterCloudEventIsNotAMissedChange(t *testing.T) {
+	h, logs := loggedHarness(t)
+	h.start()
+	h.advance(10 * time.Second)
+	h.send(cloudReached("")) // night via the cloud; the bridge copy lags
+	h.run(time.Minute)       // the 1-minute read still shows day
+	if h.bridge.statusCalls < 2 {
+		t.Fatalf("status calls %d", h.bridge.statusCalls)
+	}
+	if strings.Contains(logs.String(), undeliveredMsg) || h.lock() != "LOCKED" {
+		t.Fatalf("lock %s log %s", h.lock(), logs)
+	}
+}
+
+// Final review M-2: a lock that ignores a command (no webhook on any feed)
+// says nothing about bridge → gateway delivery.
+func TestIgnoredLocalCommandDoesNotUnconfirm(t *testing.T) {
+	h, logs := loggedHarness(t)
+	h.start()
+	h.confirmDelivery()
+	h.advance(time.Second)
+	h.cmd(model.CommandLock, "")
+	h.run(40 * time.Second)
+	if st := h.lastStatus(); st.Status != model.StatusFailed {
+		t.Fatalf("status %+v", st)
+	}
+	if !h.s.webhookConfirmed || strings.Contains(logs.String(), undeliveredMsg) {
+		t.Fatalf("confirmed %v log %s", h.s.webhookConfirmed, logs)
+	}
+}

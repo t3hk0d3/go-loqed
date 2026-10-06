@@ -304,3 +304,19 @@ func TestQueuedCommandAfterCommandFailoverUsesCloud(t *testing.T) {
 		t.Fatalf("cloud commands %v", h.cloud.commands)
 	}
 }
+
+// Final review M-1: a bridge webhook during the command proves the bridge
+// alive, so the deferred failover is dropped.
+func TestCommandFailoverDroppedWhenBridgeRecovers(t *testing.T) {
+	h, _, _ := commandFailoverHarness(t)
+	h.cmd(model.CommandLock, "")
+	h.step(21 * time.Second)
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", ourKey)) // confirms the command
+	if st := h.lastStatus(); st.Status != model.StatusConfirmed {
+		t.Fatalf("status %+v", st)
+	}
+	h.run(10 * time.Second)
+	if len(h.refreshes) != 0 || h.s.mode != model.ModeLocal {
+		t.Fatalf("refreshes %v mode %s", h.refreshes, h.s.mode)
+	}
+}

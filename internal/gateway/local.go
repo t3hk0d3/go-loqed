@@ -45,7 +45,7 @@ func (s *Supervisor) tryEnterLocal(ctx context.Context) bool {
 	now := s.d.Now()
 	s.setMode(model.ModeLocal)
 	s.markUnconfirmed(now)
-	s.bridgeCheckAt = time.Time{}
+	s.bridgeCheckAt, s.bridgeCheckCmd = time.Time{}, nil
 	s.applyStatus(ctx, now, st)
 	s.nextProbe = now.Add(s.t.Liveness)
 	s.nextReconcile = now.Add(s.t.Reconcile)
@@ -199,7 +199,11 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 				return true
 			}
 			s.bridgeCheckAt = time.Time{}
-			if s.lastBridgeEventAt.Before(s.bridgeCheckSince) {
+			// Only a command shown to have worked is evidence: a lock that
+			// ignored it sends no webhook on any feed.
+			c := s.bridgeCheckCmd
+			s.bridgeCheckCmd = nil
+			if c != nil && c.status == model.StatusConfirmed && s.lastBridgeEventAt.Before(s.bridgeCheckSince) {
 				s.unconfirmWebhooks(now, "a command sent via the bridge was not followed by any bridge webhook")
 			}
 			return true
@@ -280,6 +284,14 @@ func (s *Supervisor) readStatus(ctx context.Context) bool {
 // webhook arrived for a reconcile interval, so changes are not delivered.
 func (s *Supervisor) missedBridgeChange(now time.Time, bolt loqed.BoltState) bool {
 	if bolt == loqed.BoltUnknown || s.state.BoltState == loqed.BoltUnknown || bolt == s.state.BoltState {
+		return false
+	}
+	// A read the hint rules would not apply only lags (cloud copies and
+	// webhooks usually come first); it proves nothing about delivery.
+	if s.move.active && bolt == s.move.from && now.Sub(s.move.at) < s.t.StatusMoveWindow {
+		return false
+	}
+	if !s.lastBoltEventAt.IsZero() && now.Sub(s.lastBoltEventAt) < s.t.StatusEventWindow {
 		return false
 	}
 	return s.lastBridgeEventAt.IsZero() || now.Sub(s.lastBridgeEventAt) > s.t.Reconcile
