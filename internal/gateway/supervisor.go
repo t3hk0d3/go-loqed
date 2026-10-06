@@ -240,6 +240,26 @@ func (s *Supervisor) BridgeKey() ([]byte, bool) {
 // ErrCloudIDMismatch: a cloud webhook on this lock's URL names another lock.
 var ErrCloudIDMismatch = errors.New("gateway: cloud webhook is for a different lock")
 
+// CloudIDMismatchError is the ErrCloudIDMismatch returned by BindCloudID. It
+// carries both numeric ids so the warning can show what the lock is bound to:
+// a wrong first webhook binds the lock for good.
+type CloudIDMismatchError struct{ Bound, Got string }
+
+func (e *CloudIDMismatchError) Error() string {
+	return fmt.Sprintf("%v: this URL belongs to cloud lock %s, the webhook names %s", ErrCloudIDMismatch, e.Bound, e.Got)
+}
+
+func (e *CloudIDMismatchError) Unwrap() error { return ErrCloudIDMismatch }
+
+// BoundCloudID returns the id a lock is bound to from a mismatch error, or "".
+func BoundCloudID(err error) string {
+	var m *CloudIDMismatchError
+	if errors.As(err, &m) {
+		return m.Bound
+	}
+	return ""
+}
+
 // BindCloudID checks the numeric lock id of a cloud webhook against the one
 // learned from the first webhook on this lock's URL (and learns it then).
 // It may be called from any goroutine.
@@ -255,7 +275,7 @@ func (s *Supervisor) BindCloudID(id string) error {
 	default:
 		bound := s.rec.CloudWebhookID
 		s.mu.Unlock()
-		return fmt.Errorf("%w: this URL belongs to cloud lock %s, the webhook names %s", ErrCloudIDMismatch, bound, id)
+		return &CloudIDMismatchError{Bound: bound, Got: id}
 	}
 	s.log.Info("learned the cloud lock id from its first cloud webhook", "cloud_lock_id", id)
 	if s.d.SaveCloudWebhookID != nil {

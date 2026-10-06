@@ -167,6 +167,10 @@ func TestDeliverCloudWebhookMismatch(t *testing.T) {
 	if ev.LockID != "7001" {
 		t.Fatalf("event must carry the body's lock_id: %+v", ev)
 	}
+	var mismatch *CloudIDMismatchError
+	if !errors.As(err, &mismatch) || mismatch.Bound != "6148" || mismatch.Got != "7001" {
+		t.Fatalf("error must name the bound id: %#v", err)
+	}
 	if n := len(queued(h.s)); n != 0 {
 		t.Fatalf("queued %d", n)
 	}

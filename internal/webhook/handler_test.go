@@ -61,7 +61,7 @@ func (f *fakeSink) DeliverCloudWebhook(lockID string, body []byte) (cloud.Webhoo
 	if f.boundID == "" {
 		f.boundID = ev.LockID
 	} else if f.boundID != ev.LockID {
-		return ev, gateway.ErrCloudIDMismatch
+		return ev, &gateway.CloudIDMismatchError{Bound: f.boundID, Got: ev.LockID}
 	}
 	if f.busy {
 		return ev, gateway.ErrBusy
@@ -195,7 +195,7 @@ func TestCloudWebhookForAnotherLockIsRejected(t *testing.T) {
 		t.Fatal("event delivered")
 	}
 	out := buf.String()
-	if !strings.Contains(out, "7001") || !strings.Contains(out, "lock1") || strings.Contains(out, "jane@") || strings.Contains(out, secret) {
+	if !strings.Contains(out, " cloud_lock_id=7001") || !strings.Contains(out, "bound_cloud_lock_id=6148") || !strings.Contains(out, "lock1") || strings.Contains(out, "jane@") || strings.Contains(out, secret) {
 		t.Fatalf("log: %s", out)
 	}
 }

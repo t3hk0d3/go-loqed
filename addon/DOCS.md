@@ -124,8 +124,17 @@ Things to keep in mind:
   ignored (a retained body would be replayed as a new event on every
   reconnect); the log says so.
 - **One URL per lock.** Don't point one lock's URL at another lock's topic.
-  The first webhook on a topic binds it to that lock; a later body for a
-  different lock is dropped with a warning.
+  The first webhook on a topic binds that lock to the cloud lock id in the
+  body, and the binding is kept across restarts. A later body with a
+  different id is dropped with a warning showing both `cloud_lock_id` (the
+  body's) and `bound_cloud_lock_id`. If the very first webhook came from the
+  wrong lock, correcting the automation is not enough: the lock stays bound
+  to the wrong id. To reset it, stop the gateway, remove that lock's
+  `cloud_webhook_id` from `/data/locks.json`, and start it again. (Deleting
+  the whole file also drops a token the add-on created and the cloud webhook
+  URL secret.) In the add-on,
+  `/data` is only reachable by reinstalling it, so double-check the mapping
+  before registering the URLs.
 - **The body is forwarded as LOQED sends it.** It includes your account
   e-mail and name. The add-on never reads or logs those fields, but anything
   else subscribed to `loqed/#` can see them.

@@ -108,7 +108,7 @@ func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, gateway.ErrCloudIDMismatch) {
 		o.Log.Warn("rejected a cloud webhook registered on another lock's URL; register each lock's own URL",
-			"lock_id", id, "cloud_lock_id", ev.LockID)
+			"lock_id", id, "cloud_lock_id", ev.LockID, "bound_cloud_lock_id", gateway.BoundCloudID(err))
 		http.Error(w, "this URL belongs to another lock", http.StatusConflict)
 		return
 	}

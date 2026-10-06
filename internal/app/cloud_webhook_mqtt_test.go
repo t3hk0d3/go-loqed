@@ -155,7 +155,7 @@ func TestCloudWebhookOverMQTTMismatchDropped(t *testing.T) {
 	r.sub.Publish(t, "loqed/lock1/cloud_webhook", relayLocked, false)
 	eventually(t, "locked event", func() bool { return len(r.events(model.EventLocked)) == 1 })
 	r.sub.Publish(t, "loqed/lock1/cloud_webhook", strings.Replace(relayUnlocked, "6148", "7001", 1), false)
-	r.waitLog(t, "level=WARN", "lock_id=lock1", "cloud_lock_id=7001")
+	r.waitLog(t, "level=WARN", "lock_id=lock1", " cloud_lock_id=7001", "bound_cloud_lock_id=6148")
 	time.Sleep(300 * time.Millisecond)
 	if n := len(r.events(model.EventUnlocked)); n != 0 {
 		t.Fatalf("event from another lock published %d times", n)

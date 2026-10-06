@@ -294,7 +294,7 @@ func forwardCloudWebhooks(ctx context.Context, mq *mqtt.Client, m *gateway.Manag
 			case err == nil:
 			case errors.Is(err, gateway.ErrCloudIDMismatch):
 				log.Warn("dropped a cloud webhook relayed for another lock; relay each lock's webhook to its own topic",
-					"lock_id", cw.LockID, "cloud_lock_id", ev.LockID)
+					"lock_id", cw.LockID, "cloud_lock_id", ev.LockID, "bound_cloud_lock_id", gateway.BoundCloudID(err))
 			case errors.Is(err, loqed.ErrInvalidPayload):
 				log.Warn("dropped an invalid cloud webhook relayed over MQTT", "lock_id", cw.LockID)
 			case errors.Is(err, gateway.ErrUnknownLock):
