@@ -25,7 +25,7 @@ const MQTTGrace = 5 * time.Minute
 type Sink interface {
 	BridgeKey(lockID string) ([]byte, bool)
 	DeliverBridgeEvent(lockID string, ev bridge.Event) error
-	DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error
+	DeliverCloudWebhook(lockID string, body []byte) (cloud.WebhookEvent, error)
 	Health() map[string]gateway.Health
 }
 
@@ -100,13 +100,12 @@ func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	ev, err := cloud.ParseWebhook(body) // the body is never logged: it holds personal data
-	if err != nil {
+	id := r.PathValue("id")
+	ev, err := o.Sink.DeliverCloudWebhook(id, body) // the body is never logged: it holds personal data
+	if errors.Is(err, loqed.ErrInvalidPayload) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	id := r.PathValue("id")
-	err = o.Sink.DeliverCloudEvent(id, ev)
 	if errors.Is(err, gateway.ErrCloudIDMismatch) {
 		o.Log.Warn("rejected a cloud webhook registered on another lock's URL; register each lock's own URL",
 			"lock_id", id, "cloud_lock_id", ev.LockID)

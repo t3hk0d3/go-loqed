@@ -118,6 +118,19 @@ func (m *Manager) DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error 
 	return nil
 }
 
+// DeliverCloudWebhook decodes a raw cloud webhook body and routes it like
+// DeliverCloudEvent. It is the one path for every cloud webhook input (HTTP
+// and MQTT), so both share the binding rules. The decoded event is returned
+// so a caller can log its lock id on ErrCloudIDMismatch; it is the zero value
+// when decoding failed (loqed.ErrInvalidPayload). The body is never logged.
+func (m *Manager) DeliverCloudWebhook(lockID string, body []byte) (cloud.WebhookEvent, error) {
+	ev, err := cloud.ParseWebhook(body)
+	if err != nil {
+		return cloud.WebhookEvent{}, err
+	}
+	return ev, m.DeliverCloudEvent(lockID, ev)
+}
+
 func (m *Manager) DeliverCommand(lockID string, c model.Command, id string, at time.Time) error {
 	return m.deliver(lockID, CommandMsg{Command: c, ID: id, At: at})
 }

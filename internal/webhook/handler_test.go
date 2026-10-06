@@ -49,18 +49,26 @@ func (f *fakeSink) DeliverBridgeEvent(_ string, ev bridge.Event) error {
 	return nil
 }
 
-func (f *fakeSink) DeliverCloudEvent(lockID string, ev cloud.WebhookEvent) error {
+// DeliverCloudWebhook mirrors gateway.Manager: decode, then route and bind.
+func (f *fakeSink) DeliverCloudWebhook(lockID string, body []byte) (cloud.WebhookEvent, error) {
+	ev, err := cloud.ParseWebhook(body)
+	if err != nil {
+		return cloud.WebhookEvent{}, err
+	}
 	if lockID != "lock1" {
-		return gateway.ErrUnknownLock
+		return ev, gateway.ErrUnknownLock
 	}
 	if f.boundID == "" {
 		f.boundID = ev.LockID
 	} else if f.boundID != ev.LockID {
-		return gateway.ErrCloudIDMismatch
+		return ev, gateway.ErrCloudIDMismatch
+	}
+	if f.busy {
+		return ev, gateway.ErrBusy
 	}
 	f.cloudEvents = append(f.cloudEvents, ev)
 	f.cloudLocks = append(f.cloudLocks, lockID)
-	return nil
+	return ev, nil
 }
 
 func (f *fakeSink) Health() map[string]gateway.Health {
@@ -167,6 +175,10 @@ func TestCloudWebhook(t *testing.T) {
 	}
 	if code := post(handler(sink, 0, ""), "/cloud/"+secret+"/lock1", body, nil); code != 404 {
 		t.Fatalf("cloud route must be off without a secret: %d", code)
+	}
+	sink.busy = true
+	if code := post(h, "/cloud/"+secret+"/lock1", body, nil); code != 503 {
+		t.Fatalf("busy: %d", code)
 	}
 }
 
