@@ -215,7 +215,9 @@ func (p *commandPipeline) attemptLocal(ctx context.Context, now time.Time, a *co
 	a.localAttempts++
 	a.status = model.StatusSending
 	p.publish(now, a)
-	rc, cancel := context.WithTimeout(ctx, min(s.t.RequestTimeout, a.deadline.Sub(now)))
+	// End by the local cutoff: a bridge that hangs must leave the cloud
+	// attempt its time.
+	rc, cancel := context.WithTimeout(ctx, min(s.t.RequestTimeout, a.cutoff.Sub(now)))
 	err := s.bridge.Command(rc, actionFor(a.cmd))
 	cancel()
 	after := s.d.Now()

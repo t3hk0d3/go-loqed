@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -821,5 +822,67 @@ func TestCloudPollShowingUnchangedStateDoesNotConfirm(t *testing.T) {
 	h.run(15 * time.Second)
 	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailNoConfirmation {
 		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestLocalAttemptTimeoutIsRequestTimeout(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.cmd(model.CommandLock, "")
+	if len(h.bridge.cmdBudgets) != 1 {
+		t.Fatalf("bridge calls %d", len(h.bridge.cmdBudgets))
+	}
+	if d := h.bridge.cmdBudgets[0]; d > 5*time.Second || d < 4900*time.Millisecond {
+		t.Fatalf("budget %v, want the 5 s request timeout", d)
+	}
+}
+
+func TestLocalAttemptTimeoutEndsAtCutoff(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.bridge.commandErrs = unreachable(100)
+	h.cmd(model.CommandOpen, "")
+	h.step(12 * time.Second)
+	// Attempts at 0, 0.5, 1.5, 3.5 and 5.5 s; the OPEN cutoff is at 7 s.
+	if n := len(h.bridge.cmdBudgets); n != 5 {
+		t.Fatalf("local attempts %d", n)
+	}
+	if d := h.bridge.cmdBudgets[4]; d > 1500*time.Millisecond {
+		t.Fatalf("the attempt at 5.5 s may run until %v, past the 7 s cutoff", d)
+	}
+}
+
+// A bridge that accepts TCP and then hangs must not use the time reserved
+// for the cloud attempt (spec 5.8).
+func TestOpenWithHangingBridgeStillSendsViaCloud(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	start := h.now
+	var ended []time.Duration
+	h.bridge.hang = func(ctx context.Context) error {
+		dl, _ := ctx.Deadline()
+		h.now = h.now.Add(time.Until(dl)) // the hang lasts the whole budget
+		ended = append(ended, h.now.Sub(start))
+		return fmt.Errorf("%w: connect timeout", loqed.ErrUnreachable)
+	}
+	h.cmd(model.CommandOpen, "")
+	h.step(12 * time.Second)
+	for _, e := range ended {
+		if e > 7*time.Second {
+			t.Fatalf("a local attempt ended at %v, after the 7 s cutoff", e)
+		}
+	}
+	if len(h.cloud.commands) != 1 || h.cloud.commands[0] != loqed.BoltOpen {
+		t.Fatalf("cloud commands %v", h.cloud.commands)
+	}
+	sentViaCloud := false
+	for _, st := range h.pub.statuses {
+		if st.Status == model.StatusExpired {
+			t.Fatalf("expired: %v", h.trail())
+		}
+		sentViaCloud = sentViaCloud || (st.Status == model.StatusSent && *st.Via == model.ViaCloud)
+	}
+	if !sentViaCloud {
+		t.Fatalf("never sent via the cloud: %v", h.trail())
 	}
 }

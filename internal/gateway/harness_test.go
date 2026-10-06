@@ -20,7 +20,9 @@ type fakeBridge struct {
 	statusCalls int
 	commandErrs []error // consumed per call; empty = success
 	commands    []bridge.Action
-	onCommand   func() // optional hook run inside Command
+	onCommand   func()                          // optional hook run inside Command
+	hang        func(ctx context.Context) error // optional: runs inside Command, its error is returned
+	cmdBudgets  []time.Duration                 // time left on each Command context
 	hooks       []bridge.Webhook
 	listErr     error
 	listCalls   int
@@ -37,10 +39,16 @@ func (f *fakeBridge) Status(context.Context) (*bridge.Status, error) {
 	return &st, nil
 }
 
-func (f *fakeBridge) Command(_ context.Context, a bridge.Action) error {
+func (f *fakeBridge) Command(ctx context.Context, a bridge.Action) error {
 	f.commands = append(f.commands, a)
+	if dl, ok := ctx.Deadline(); ok {
+		f.cmdBudgets = append(f.cmdBudgets, time.Until(dl))
+	}
 	if f.onCommand != nil {
 		f.onCommand()
+	}
+	if f.hang != nil {
+		return f.hang(ctx)
 	}
 	if len(f.commandErrs) > 0 {
 		err := f.commandErrs[0]
