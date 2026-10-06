@@ -56,7 +56,7 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
   Repeated identical warnings are rate-limited by the existing logger.
 - The HTTP route's status codes do not change: 404, 400, 409, 503 and 200 as today.
 - A payload is never logged.
-- Fields the documentation tells relays to forward: `lock_id`, `event_type`, `requested_state`, `go_to_state`, `key_local_id`, `key_name_user`, `battery_percentage`, `wifi_strength`, `ble_strength`, `online`.
+- Relays forward the LOQED body unchanged (no field filtering). The gateway still never decodes or logs the personal fields.
 - The add-on option is `mqtt.cloud_webhooks: bool?`. Its translation has a name and a one-line description.
 
 ## Review Focus
@@ -64,7 +64,7 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 1. **A retained `cloud_webhook` message left on the broker** (a relay configured with `retain: true`). It must never be applied, at first connect or on any reconnect, and the warning must say to publish without retain. Test: Task 2, `TestCloudWebhookRetainedIgnored`, covering the initial connect and a reconnect.
 2. **Feature disabled but someone publishes to the topic.** Nothing reaches the gateway, because there is no subscription. Test: Task 2, `TestCloudWebhookNotSubscribedWhenDisabled`.
 3. **The relay posts one lock's events to another lock's topic** (wrong trigger id in a shared automation). The first event binds; a later different numeric id is dropped with a warning naming both ids, and the lock's state is unchanged. Test: Task 3, `TestCloudWebhookOverMQTTMismatchDropped`.
-4. **A relay forwards the full body, including the e-mail and `value1..3`.** It is accepted (the gateway reads only its fields), and no log line contains the personal values. Test: Task 3, `TestCloudWebhookOverMQTTNeverLogsPayload`.
+4. **The full body, including the e-mail and `value1..3`, arrives over MQTT (the documented relay forwards it as-is).** It is applied, and no log line contains the personal values. Test: Task 3, `TestCloudWebhookOverMQTTNeverLogsPayload`.
 5. **The same event arrives over MQTT and over the bridge, or twice over MQTT** (QoS 1 redelivery). It is published once. Test: Task 3, `TestCloudWebhookOverMQTTDeduplicated`.
 
 ## File Structure
@@ -270,9 +270,7 @@ BDD skeleton skipped: documentation only.
   - one webhook trigger per lock, with `local_only: false` and a trigger `id` equal to the lock's topic id from the startup log;
   - `allowed_methods: [POST]`;
   - the trigger's Nabu Casa URL (copied from the trigger's UI) is registered for that lock in the API section of app.loqed.com.
-- **The action:** `mqtt.publish` to `loqed/{{ trigger.id }}/cloud_webhook` with `retain: false` and `qos: 1`. The payload is a template that builds a JSON object from only the fields listed in Global Constraints, so the account e-mail and names never reach the broker.
-  - The template must be one of two kinds: proven during V10, or explicitly marked "verify in Developer Tools → Template".
-  - Prefer an explicit per-field mapping over a generic filter.
+- **The action:** `mqtt.publish` to `loqed/{{ trigger.id }}/cloud_webhook` with `retain: false` and `qos: 1`. The payload is the trigger's JSON body re-serialized unchanged (`trigger.json` through `to_json`); no field filtering.
 - **Why `retain: false` matters:** retained messages are ignored.
 - **Trust:**
   - the Nabu Casa URL token is the secret, so treat it like a password;
@@ -289,15 +287,15 @@ BDD skeleton skipped: documentation only.
 
 BDD skeleton skipped: a manual verification on real hardware. The steps and the expected outcomes are its contract.
 
-- [ ] **Step 1:** With the user, create the automation from Task 4 in their Home Assistant. Test the payload template in Developer Tools → Template against a synthetic sample body that uses fake values (no real e-mail).
+- [ ] **Step 1:** With the user, create the automation from Task 4 in their Home Assistant. Check in Developer Tools → Template that the payload template turns a synthetic sample body (fake values) back into identical JSON, numbers kept as numbers.
 - [ ] **Step 2:**
   - Run the gateway (scratch build) with `mqtt.cloud_webhooks: true` against the user's broker.
   - Subscribe to `loqed/+/cloud_webhook` and record only the key names and value types of each payload, never the values.
 - [ ] **Step 3:** The user registers the Nabu Casa URL for the lock at app.loqed.com and operates the lock by hand. This test sends no commands, so no lock actuation needs authorization.
-  - Expected: every payload holds only the listed fields, with numbers still numbers and the `lock_id` numeric.
+  - Expected: every payload has the same keys as LOQED's body (2.2), with numbers still numbers and the `lock_id` numeric.
   - Expected: the gateway publishes each event once, and every bridge/cloud pair is matched.
   - Measure the Nabu Casa relay's delay against the bridge copy.
-- [ ] **Step 4:** Record the outcome as V10 in spec 2.5, fold the proven template into `addon/DOCS.md`, and commit with the message `docs: record V10 (Home Assistant relay)`.
+- [ ] **Step 4:** Record the outcome as V10 in spec 2.5, correct the recipe in `addon/DOCS.md` if the check found a difference, and commit with the message `docs: record V10 (Home Assistant relay)`.
 - [ ] **Step 5:** Clean up with the user: remove the test automation or keep it as their production relay, and remove any scratch containers.
 
 ## Spec coverage
