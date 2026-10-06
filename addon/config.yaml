@@ -1,0 +1,66 @@
+name: LOQED MQTT Gateway
+version: "0.1.0"
+slug: loqed_mqtt
+description: Local-first LOQED smart lock gateway for MQTT and Home Assistant
+url: https://github.com/t3hk0d3/go-loqed
+# Prebuilt image (no local build): the Supervisor pulls <image>:<version>.
+image: ghcr.io/t3hk0d3/loqed-mqtt-addon
+arch: [amd64, aarch64]
+init: false
+# The bridge must reach the gateway on the LAN; host networking makes the
+# auto-detected webhook URL correct. Ports are not mapped with host_network.
+host_network: true
+services:
+  - mqtt:need
+# Every nested key has a default so options validate on a fresh install.
+# Nesting is at most two levels (lock_settings → entry); key_names is a
+# "1=Alice,3=Bob" string.
+options:
+  locks: []
+  lock_settings: []
+  webhook:
+    private_url: ""
+    public_url: ""
+  mqtt:
+    url: ""
+    username: ""
+    password: ""
+    base_topic: loqed
+    cloud_webhooks: false
+  homeassistant:
+    enabled: true
+    discovery_prefix: homeassistant
+  log_level: info
+schema:
+  cloud_token: password?
+  cloud_email: str?
+  cloud_password: password?
+  locks: [str]
+  lock_settings:
+    - lock: str
+      bridge_ip: str?
+      bridge_key: password?
+      key_secret: password?
+      local_id: int(0,255)?
+      key_names: str?
+  cache_max_age: str?
+  reconcile_interval: str?
+  liveness_interval: str?
+  event_dedup_enabled: bool?
+  event_dedup_window: str?
+  cloud_budget: int(1,12)?
+  webhook:
+    private_url: str?
+    public_url: str?
+    cloud_secret: password?
+  mqtt:
+    url: str?
+    username: str?
+    password: password?
+    base_topic: str?
+    cloud_webhooks: bool?
+  homeassistant:
+    enabled: bool?
+    discovery_prefix: str?
+  log_level: list(debug|info|warn|error)?
+  log_format: list(text|json)?

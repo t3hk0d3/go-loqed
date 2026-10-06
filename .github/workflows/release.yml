@@ -27,6 +27,9 @@ jobs:
           - target: standalone
             image: ghcr.io/t3hk0d3/loqed-mqtt
             platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - target: addon
+            image: ghcr.io/t3hk0d3/loqed-mqtt-addon
+            platforms: linux/amd64,linux/arm64
     steps:
       - uses: actions/checkout@v5
         with:
