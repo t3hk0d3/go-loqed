@@ -13,7 +13,7 @@ import (
 func (s *Supervisor) onCloudEvent(ctx context.Context, e cloud.WebhookEvent) {
 	now := s.d.Now()
 	s.lastCloudEventAt = now
-	if (e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState) && s.isDuplicate(e.EventType, e.KeyLocalID, now) {
+	if (e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState) && s.isDuplicate("cloud", e.EventType, e.KeyLocalID, now) {
 		s.nameFromDuplicate(e.KeyNameUser)
 		return
 	}

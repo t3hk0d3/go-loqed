@@ -12,6 +12,14 @@
 
 **Prerequisite:** Tasks 1–15 of `2026-10-04-loqed-mqtt-gateway.md` are implemented on `feat/v1`. Task 16 of that plan (the real-hardware gate) runs **after** this plan.
 
+## Revisions after the real-hardware run (2026-10-06)
+
+These supersede the matching parts of the tasks below (spec 5.7 is authoritative):
+- No filtering of real state changes: the automatic latch after an open is published like any other event.
+- Cloud and bridge are equal feeds; the first copy of an event is published. Dedup (configurable `event_dedup_enabled`, `event_dedup_window` 10 s, max 30 s) drops a repeat of the latest published event and the other feed's copy of a recent event (feeds interleave).
+- `source` is `gateway` or null; no parsed categories (`touch`, `remote`, `unknown`, …).
+- `GO_TO_STATE_*_VIA_OUTSIDE_MODULE_PIN` targets open.
+
 ## Styleguide
 
 The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) together with `.golangci.yml` (golangci-lint v2.14.0 with errorlint, gosec, misspell, unconvert; gofmt). Every task follows it. The rules that matter most here:

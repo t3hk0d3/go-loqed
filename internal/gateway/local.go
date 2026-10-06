@@ -299,7 +299,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 	}
 	switch e := ev.(type) {
 	case bridge.StateReachedEvent:
-		if s.isDuplicate(e.EventType, e.KeyLocalID, now) {
+		if s.isDuplicate("bridge", e.EventType, e.KeyLocalID, now) {
 			return
 		}
 		s.state.LockOnline = true
@@ -310,7 +310,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 		s.recordEvent(now, e.EventType, e.KeyLocalID, "", model.FromStateReached(e.EventType))
 		s.cmds.onReached(ctx, now, e.BoltState, e.Jammed, e.KeyLocalID)
 	case bridge.GoToStateEvent:
-		if s.isDuplicate(e.EventType, e.KeyLocalID, now) {
+		if s.isDuplicate("bridge", e.EventType, e.KeyLocalID, now) {
 			return
 		}
 		s.startMovement(now, e.GoToState)

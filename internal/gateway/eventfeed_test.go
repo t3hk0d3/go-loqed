@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -62,17 +63,16 @@ func TestCopiesWithOtherKeysAreSeparateEvents(t *testing.T) {
 	}
 }
 
-// Only the latest event is compared (user decision): a repeat that arrives
-// after another event is published again.
-func TestOnlyTheLatestEventIsCompared(t *testing.T) {
+// A late copy from the other feed is dropped even after a newer event.
+func TestLateCopyFromOtherFeedIsDropped(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.send(bridgeGoTo(model.Ptr(3)))
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
 	h.advance(2 * time.Second)
 	h.send(cloudGoTo("", model.Ptr(3)))
-	if len(h.pub.events) != 3 {
-		t.Fatalf("events %+v", h.pub.events)
+	if len(h.pub.events) != 2 || h.lock() != "LOCKED" {
+		t.Fatalf("events %+v lock %s", h.pub.events, h.lock())
 	}
 }
 
@@ -149,7 +149,7 @@ func TestAutomaticLatchAfterOpenIsAnEvent(t *testing.T) {
 	h.advance(3 * time.Second)
 	h.send(reached("STATE_CHANGED_LATCH", nil))
 	last := h.pub.events[len(h.pub.events)-1]
-	if last.EventType != model.EventUnlocked || last.Source != model.SourceUnknown || h.lock() != "UNLOCKED" {
+	if last.EventType != model.EventUnlocked || src(last) != "" || h.lock() != "UNLOCKED" {
 		t.Fatalf("event %+v lock %s", last, h.lock())
 	}
 }
@@ -158,27 +158,79 @@ func TestEventSources(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{}) // gateway key is local_id 1
 	h.start()
 	h.send(reached("STATE_CHANGED_LATCH", nil))
-	if src := h.pub.events[0].Source; src != model.SourceUnknown {
-		t.Fatalf("no key: %s", src)
-	}
 	h.advance(11 * time.Second)
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK_REMOTE", model.Ptr(1)))
-	if src := h.pub.events[1].Source; src != "remote" {
-		t.Fatalf("own key without a gateway command: %s", src)
-	}
 	h.s.lastCommandSentAt = h.now
 	h.advance(59 * time.Second)
 	h.send(reached("STATE_CHANGED_LATCH_REMOTE", model.Ptr(1)))
-	if src := h.pub.events[2].Source; src != model.SourceGateway {
-		t.Fatalf("own key within 60 s of a gateway command: %s", src)
-	}
 	h.advance(2 * time.Second)
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK_REMOTE", model.Ptr(1)))
-	if src := h.pub.events[3].Source; src != "remote" {
-		t.Fatalf("own key after the window: %s", src)
-	}
 	h.send(reached("STATE_CHANGED_LATCH_REMOTE", model.Ptr(2)))
-	if src := h.pub.events[4].Source; src != "remote" {
-		t.Fatalf("another key: %s", src)
+	want := []string{"", "", model.SourceGateway, "", ""}
+	for i, w := range want {
+		if got := src(h.pub.events[i]); got != w {
+			t.Errorf("event %d (%s key %v): source %q, want %q", i, h.pub.events[i].Reason, h.pub.events[i].KeyLocalID, got, w)
+		}
 	}
+}
+
+// Observed 2026-10-06 (PIN unlock): the bridge copies arrived 2 s late,
+// after the cloud's next event.
+func TestInterleavedCopiesArePublishedOnce(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	pin := func(feed string) any {
+		if feed == "cloud" {
+			return CloudEventMsg{Event: cloud.WebhookEvent{Kind: cloud.KindGoToState, EventType: "GO_TO_STATE_MANUAL_UNLOCK_VIA_OUTSIDE_MODULE_PIN",
+				GoToState: loqed.BoltOpen, KeyLocalID: model.Ptr(1)}}
+		}
+		return BridgeEventMsg{Event: bridge.GoToStateEvent{EventType: "GO_TO_STATE_MANUAL_UNLOCK_VIA_OUTSIDE_MODULE_PIN",
+			GoToState: loqed.BoltOpen, KeyLocalID: model.Ptr(1)}}
+	}
+	opened := CloudEventMsg{Event: cloud.WebhookEvent{Kind: cloud.KindStateReached, EventType: "STATE_CHANGED_OPEN",
+		BoltState: loqed.BoltOpen, KeyLocalID: model.Ptr(1)}}
+	h.send(pin("cloud"))
+	h.advance(900 * time.Millisecond)
+	h.send(opened)
+	h.advance(1100 * time.Millisecond)
+	h.send(pin("bridge"))
+	h.send(reached("STATE_CHANGED_OPEN", model.Ptr(1)))
+	var got []model.EventType
+	for _, e := range h.pub.events {
+		got = append(got, e.EventType)
+	}
+	if !slices.Equal(got, []model.EventType{model.EventOpening, model.EventOpened}) || h.lock() != "OPEN" {
+		t.Fatalf("events %v lock %s", got, h.lock())
+	}
+}
+
+// Knob jiggling repeats the same event: noise, dropped. A real change back
+// is not a repeat and is published, so the state stays right.
+func TestRepeatsAreDroppedButChangesBackArePublished(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	both := func(eventType string) {
+		h.send(CloudEventMsg{Event: cloud.WebhookEvent{Kind: cloud.KindStateReached, EventType: eventType,
+			BoltState: mustReached(eventType)}})
+		h.advance(300 * time.Millisecond)
+		h.send(reached(eventType, nil))
+		h.advance(2 * time.Second)
+	}
+	both("STATE_CHANGED_LATCH")
+	both("STATE_CHANGED_LATCH") // jiggle
+	both("STATE_CHANGED_NIGHT_LOCK")
+	both("STATE_CHANGED_LATCH")
+	var got []model.EventType
+	for _, e := range h.pub.events {
+		got = append(got, e.EventType)
+	}
+	want := []model.EventType{model.EventUnlocked, model.EventLocked, model.EventUnlocked}
+	if !slices.Equal(got, want) || h.lock() != "UNLOCKED" {
+		t.Fatalf("events %v, want %v; lock %s", got, want, h.lock())
+	}
+}
+
+func mustReached(eventType string) loqed.BoltState {
+	b, _ := loqed.ReachedState(eventType)
+	return b
 }

@@ -198,8 +198,8 @@ type Supervisor struct {
 	lastPollAt       time.Time // last successful cloud poll
 	lastCloudEventAt time.Time
 
-	lastLockEvent     *lockEvent // latest lock event from either feed (duplicate drop)
-	lastCommandSentAt time.Time  // last gateway command written to the bridge or cloud
+	published         []*lockEvent // lock events published within DuplicateWindow (duplicate drop)
+	lastCommandSentAt time.Time    // last gateway command written to the bridge or cloud
 
 	warned map[string]*warnState
 
@@ -432,8 +432,10 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 	at := now.UTC().Truncate(time.Second)
 	s.state.LastEvent, s.state.LastKeyID, s.state.LastKeyName, s.state.LastEventAt = eventType, key, name, &at
 	s.publish()
-	source := model.SourceFor(eventType, key, s.isGatewayKey(key) && s.gatewayActive(now))
-	ev := model.Event{EventType: t.Event, Reason: eventType, Source: source, KeyLocalID: key, KeyName: name}
+	ev := model.Event{EventType: t.Event, Reason: eventType, KeyLocalID: key, KeyName: name}
+	if s.isGatewayKey(key) && s.gatewayActive(now) {
+		ev.Source = model.Ptr(model.SourceGateway)
+	}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {
 		s.log.Warn("publishing event failed", "err", err)
 	}
@@ -475,7 +477,7 @@ func (s *Supervisor) scheduleCloudConfirm(now time.Time, target loqed.BoltState)
 // commandFailed reports a command failure to HA as a command_failed event.
 func (s *Supervisor) commandFailed(c model.Command, class string, err error) {
 	s.log.Error("lock command failed", "command", c, "error_class", class, "err", err)
-	ev := model.Event{EventType: model.EventCommandFailed, Reason: string(c), Source: model.SourceGateway, Error: class}
+	ev := model.Event{EventType: model.EventCommandFailed, Reason: string(c), Source: model.Ptr(model.SourceGateway), Error: class}
 	if perr := s.d.Publisher.PublishEvent(s.id, ev); perr != nil {
 		s.log.Warn("publishing event failed", "err", perr)
 	}

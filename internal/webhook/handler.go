@@ -90,6 +90,8 @@ func (o Options) bridgeWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(r.PathValue("secret")), []byte(o.CloudSecret)) != 1 {
+		// Never log the path: it may hold a (mistyped) secret.
+		o.Log.Debug("rejected a cloud webhook with a wrong secret; check the URL registered at app.loqed.com")
 		http.NotFound(w, r)
 		return
 	}
@@ -110,6 +112,9 @@ func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {
 			"lock_id", id, "cloud_lock_id", ev.LockID)
 		http.Error(w, "this URL belongs to another lock", http.StatusConflict)
 		return
+	}
+	if errors.Is(err, gateway.ErrUnknownLock) {
+		o.Log.Debug("rejected a cloud webhook for an unknown lock; check the URL registered at app.loqed.com", "lock_id", id)
 	}
 	o.deliverResult(w, r, err)
 }

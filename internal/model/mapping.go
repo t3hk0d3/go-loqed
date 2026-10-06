@@ -87,30 +87,3 @@ func FromGoTo(target loqed.BoltState, current *LockState) Transition {
 	}
 	return t
 }
-
-var sources = []struct{ token, source string }{
-	{"TWIST_ASSIST", "twist_assist"},
-	{"INSTANTOPEN", "instant_open"},
-	{"TOUCH", "touch"},
-	{"REMOTE", "remote"},
-}
-
-// SourceFor classifies who operated the lock. Without a key it is unknown
-// (a turn by hand and the lock's own actions look the same); the gateway's
-// key acting on a recent gateway command is the gateway; otherwise the event
-// type tells. REMOTE means any key acting remotely, not necessarily a bridge.
-func SourceFor(eventType string, key *int, gateway bool) string {
-	switch {
-	case key == nil:
-		return SourceUnknown
-	case gateway:
-		return SourceGateway
-	}
-	et := strings.ToUpper(eventType)
-	for _, s := range sources {
-		if strings.Contains(et, s.token) {
-			return s.source
-		}
-	}
-	return "other"
-}

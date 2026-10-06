@@ -228,6 +228,14 @@ func (h *harness) lock() string {
 
 func (h *harness) available() bool { return h.pub.avail[len(h.pub.avail)-1] }
 
+// src renders an event source ("" for null).
+func src(e model.Event) string {
+	if e.Source == nil {
+		return ""
+	}
+	return *e.Source
+}
+
 // failedCommands returns the error classes of command_failed events.
 func (h *harness) failedCommands() []string {
 	var out []string

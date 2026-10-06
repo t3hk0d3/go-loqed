@@ -6,7 +6,7 @@ Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revi
 **Rev 2.1 (2026-10-05)** — all changes come from tests against a real LOQED Touch, bridge and account (2.5):
 - Command pipeline redesigned (5.8): latest command wins, retries only when a request provably never left, 30 s / 10 s deadlines, local-then-cloud, confirmation from webhooks, retained `command_status` topic.
 - `WebhookConfirm` 10 s → 30 s; bridge `/status` demoted to a hint that never overrides newer webhook state (5.5).
-- `key_local_id` 255, `""`, `null` or absent means "no key" (a manual action by hand or a system action such as the automatic latch after an open); events without a key get source `unknown` (4.1, 4.2, 5.7).
+- `key_local_id` 255, `""`, `null` or absent means "no key" (a manual action by hand or a system action such as the automatic latch after an open); events carry `key_local_id` null (4.1, 4.2, 5.7); `source` is only `gateway` or null (revised 2026-10-06).
 - Cloud webhooks carry the numeric internal lock id, not the API id → one cloud webhook URL per lock (5.4, 7); duplicate deliveries are dropped; cloud events may arrive before bridge events (5.7).
 - Token lifetime and lock-key lifecycle: tokens expire (~182 days); revoking or expiring a token does not revoke its lock key; deleting the key in the app does (5.2).
 - Portal login sends `remember: false` (4.3).
@@ -377,7 +377,7 @@ Bolt state → HA lock state:
 
 Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`, `unlocking`, `opening`, `jammed`, `unknown`, `command_failed`. Unrecognized raw event types map to `unknown` (never dropped). `command_failed` carries `reason` = the command (`LOCK`/`UNLOCK`/`OPEN`) and `source` = `gateway`, plus an `error` attribute with the error class (`expired`, `offline`, `unreachable`, `no_response`, `unauthorized`, `rate_limited`, `failed`).
 
-Event attributes: `reason` (raw `event_type`), `source`, `key_local_id` (null for no key), `key_name`. `source` is decided in this order: no key → `unknown`; the key is the gateway's own `local_id` and a gateway command is in flight or was sent in the last 60 s → `gateway`; otherwise parsed from the raw type (`touch`, `twist_assist`, `instant_open`, `remote` for `*_REMOTE_*`, `other`). The `manual` source value is dropped: it cannot be distinguished from system actions. `remote` means "another key acting remotely" (the app over BLE, another integration, the cloud), not necessarily the bridge.
+Event attributes: `reason` (raw `event_type`), `source`, `key_local_id` (null for no key), `key_name`. `source` is `gateway` when the key is the gateway's own `local_id` and a gateway command is in flight or was sent in the last 60 s (and on `command_failed`), otherwise `null` (revised 2026-10-06). How the lock was operated (touch, twist assist, instant open, PIN, remote key) is in the raw `reason`; the gateway does not parse it into categories.
 
 The gateway is a faithful bridge: every state change the lock reports is published, including the automatic return to day_lock after an open (an `unlocked` event with source `unknown`). Only repeat deliveries of the same event are dropped (below).
 
@@ -385,7 +385,7 @@ The gateway is a faithful bridge: every state change the lock reports is publish
 
 Event sources by mode:
 - `local`: bridge and cloud webhooks, as equal feeds. Whichever copy of an event arrives first is applied and published (cloud copies usually arrive first).
-- Deduplication (revised 2026-10-06): an event with the same `event_type` and key as the **latest** received lock event, from either feed, within `event_dedup_window` (default 10 s, max 30 s) is dropped, unless `event_dedup_enabled` is false. Only the latest event is compared. A dropped cloud copy may still add `key_name` to the state document (no second event).
+- Deduplication (revised 2026-10-06, after a real-hardware run): within `event_dedup_window` (default 10 s, max 30 s; off with `event_dedup_enabled: false`) an event is dropped when it (a) repeats the latest published event (same `event_type` and key, any feed: a cloud re-delivery, the other feed's copy, or the same action repeated, such as jiggling the knob, which is noise), or (b) is the other feed's copy of a recent published event whose copy has not arrived yet (the feeds interleave: a PIN unlock delivered cloud GO_TO, cloud STATE_CHANGED, then both bridge copies 2 s late). A real change back (day, night, day) is never dropped. A dropped cloud copy may still add `key_name` to the state document (no second event).
 - `cloud`: cloud webhooks, if configured.
 - Never from polling: no synthetic events from `/status` or `ListLocks` results. Event delivery is best-effort (webhooks can be lost); documentation states that automations about *whether* the door is locked must use the lock entity.
 

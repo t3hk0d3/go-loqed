@@ -53,12 +53,10 @@ const (
 
 var EventTypes = []EventType{EventLocked, EventUnlocked, EventOpened, EventLocking, EventUnlocking, EventOpening, EventJammed, EventUnknown, EventCommandFailed}
 
-// Event sources the gateway decides itself; the others are parsed from
-// the event type (see SourceFor).
-const (
-	SourceGateway = "gateway" // the gateway's own key acting on a gateway command
-	SourceUnknown = "unknown" // no key: a turn by hand or an action of the lock itself
-)
+// SourceGateway marks events caused by the gateway: its own key acting on
+// one of its commands, and command_failed. Every other event has source
+// null; who or what acted is in the raw event type (reason) and the key.
+const SourceGateway = "gateway"
 
 // Command failure classes, published as command_status.error and as the
 // command_failed event's error.
@@ -144,7 +142,7 @@ type State struct {
 type Event struct {
 	EventType  EventType `json:"event_type"`
 	Reason     string    `json:"reason"`
-	Source     string    `json:"source"`
+	Source     *string   `json:"source"`
 	KeyLocalID *int      `json:"key_local_id"`
 	KeyName    *string   `json:"key_name"`
 	Error      string    `json:"error,omitempty"` // command_failed only

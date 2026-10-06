@@ -69,7 +69,9 @@ func GoToTarget(eventType, goToState string) BoltState {
 	}
 	et := strings.ToUpper(strings.TrimSpace(eventType))
 	switch {
-	case strings.HasSuffix(et, "_OPEN"):
+	case strings.HasSuffix(et, "_OPEN"), strings.HasSuffix(et, "_VIA_OUTSIDE_MODULE_PIN"):
+		// A PIN on the outside keypad opens the door (observed 2026-10-06:
+		// the bridge reports go_to_state OPEN, the cloud copy reports none).
 		return BoltOpen
 	case strings.HasSuffix(et, "_LATCH"), strings.HasSuffix(et, "_DAY_LOCK"):
 		return BoltDayLock

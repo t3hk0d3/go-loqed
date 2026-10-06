@@ -232,3 +232,20 @@ func TestLikelyContainerAddress(t *testing.T) {
 		t.Fatal("false positive")
 	}
 }
+
+func TestRejectedCloudWebhooksAreLoggedWithoutSecret(t *testing.T) {
+	var buf bytes.Buffer
+	h := webhook.NewHandler(webhook.Options{Sink: &fakeSink{}, CloudSecret: secret, Now: func() time.Time { return now },
+		Log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":"6148"}`
+	wrong := "wrong-secret-0000000000000000000"
+	post(h, "/cloud/"+wrong+"/lock1", body, nil)
+	post(h, "/cloud/"+secret+"/other", body, nil)
+	out := buf.String()
+	if !strings.Contains(out, "wrong secret") || !strings.Contains(out, "unknown lock") || !strings.Contains(out, "lock_id=other") {
+		t.Fatalf("log: %s", out)
+	}
+	if strings.Contains(out, wrong) || strings.Contains(out, secret) {
+		t.Fatalf("secret logged: %s", out)
+	}
+}

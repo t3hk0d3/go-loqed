@@ -87,31 +87,14 @@ func TestApply(t *testing.T) {
 	}
 }
 
-func TestSourceFor(t *testing.T) {
-	key := model.Ptr(3)
-	parsed := map[string]string{
-		"GO_TO_STATE_TWIST_ASSIST_LATCH":            "twist_assist",
-		"GO_TO_STATE_INSTANTOPEN_OPEN":              "instant_open",
-		"GO_TO_STATE_TOUCH_TO_LOCK":                 "touch",
-		"go_to_state_touch_to_lock":                 "touch",
-		"STATE_CHANGED_LATCH_REMOTE":                "remote",
-		"GO_TO_STATE_MANUAL_LOCK_REMOTE_NIGHT_LOCK": "remote",
-		"GO_TO_STATE_MANUAL_UNLOCK_BLE_OPEN":        "other",
-		"STATE_CHANGED_NIGHT_LOCK":                  "other",
+func TestEventSourceIsNullUnlessGateway(t *testing.T) {
+	b, _ := json.Marshal(model.Event{EventType: model.EventLocked, Reason: "STATE_CHANGED_NIGHT_LOCK"})
+	if !strings.Contains(string(b), `"source":null`) {
+		t.Fatalf("got %s", b)
 	}
-	for in, want := range parsed {
-		if got := model.SourceFor(in, key, false); got != want {
-			t.Errorf("%s: got %s want %s", in, got, want)
-		}
-		if got := model.SourceFor(in, nil, false); got != model.SourceUnknown {
-			t.Errorf("%s without a key: got %s want unknown", in, got)
-		}
-		if got := model.SourceFor(in, nil, true); got != model.SourceUnknown {
-			t.Errorf("%s without a key is never the gateway: got %s", in, got)
-		}
-		if got := model.SourceFor(in, key, true); got != model.SourceGateway {
-			t.Errorf("%s from the gateway: got %s", in, got)
-		}
+	b, _ = json.Marshal(model.Event{EventType: model.EventLocked, Source: model.Ptr(model.SourceGateway)})
+	if !strings.Contains(string(b), `"source":"gateway"`) {
+		t.Fatalf("got %s", b)
 	}
 }
 

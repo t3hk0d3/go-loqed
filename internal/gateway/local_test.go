@@ -52,7 +52,7 @@ func TestBridgeEventsUpdateStateAndEmitEvents(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.send(goTo("GO_TO_STATE_TOUCH_TO_LOCK", loqed.BoltNightLock))
-	if h.lock() != "LOCKING" || h.pub.events[0].EventType != model.EventLocking || h.pub.events[0].Source != "touch" {
+	if h.lock() != "LOCKING" || h.pub.events[0].EventType != model.EventLocking || src(h.pub.events[0]) != "" {
 		t.Fatalf("lock %s events %+v", h.lock(), h.pub.events)
 	}
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", nil)) // the library maps 255 to nil

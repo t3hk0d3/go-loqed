@@ -284,7 +284,7 @@ func TestEndToEnd(t *testing.T) {
 	sub.WaitFor(t, 10*time.Second, func(m testutil.Message) bool {
 		var e model.Event
 		return m.Topic == "loqed/lock1/event" && json.Unmarshal(m.Payload, &e) == nil && e.EventType == model.EventLocked &&
-			e.Source == model.SourceGateway
+			e.Source != nil && *e.Source == model.SourceGateway
 	})
 
 	// Cloud route: enriches the bridge event with the key name.

@@ -195,7 +195,7 @@ func TestOfflineLockFailsCommandsAtOnce(t *testing.T) {
 	if got := h.failedCommands(); !slices.Equal(got, []string{model.FailOffline}) {
 		t.Fatalf("command_failed %v", got)
 	}
-	if ev := h.pub.events[len(h.pub.events)-1]; ev.Reason != "OPEN" || ev.Source != model.SourceGateway {
+	if ev := h.pub.events[len(h.pub.events)-1]; ev.Reason != "OPEN" || src(ev) != model.SourceGateway {
 		t.Fatalf("event %+v", ev)
 	}
 }
@@ -538,7 +538,7 @@ func TestGoToWithOurKeyIsAccepted(t *testing.T) {
 	if h.lastStatus().Status != model.StatusAccepted {
 		t.Fatalf("status %+v", h.lastStatus())
 	}
-	if ev := h.pub.events[len(h.pub.events)-1]; ev.Source != model.SourceGateway {
+	if ev := h.pub.events[len(h.pub.events)-1]; src(ev) != model.SourceGateway {
 		t.Fatalf("our key during our command is the gateway: %+v", ev)
 	}
 }

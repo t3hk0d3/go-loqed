@@ -56,6 +56,7 @@ func TestGoToTarget(t *testing.T) {
 		{"GO_TO_STATE_INSTANTOPEN_OPEN", "", loqed.BoltOpen},
 		{"GO_TO_STATE_TOUCH_TO_LOCK", "", loqed.BoltNightLock},
 		{"GO_TO_STATE_MANUAL_UNLOCK_VIA_OUTSIDE_LATCH", "", loqed.BoltDayLock},
+		{"GO_TO_STATE_MANUAL_UNLOCK_VIA_OUTSIDE_MODULE_PIN", "", loqed.BoltOpen},
 		{"GO_TO_STATE_WHATEVER", "", loqed.BoltUnknown},
 	}
 	for _, c := range cases {
