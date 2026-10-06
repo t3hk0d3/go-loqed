@@ -27,6 +27,7 @@ options:
     username: ""
     password: ""
     base_topic: loqed
+    cloud_webhooks: false
   homeassistant:
     enabled: true
     discovery_prefix: homeassistant
@@ -58,6 +59,7 @@ schema:
     username: str?
     password: password?
     base_topic: str?
+    cloud_webhooks: bool?
   homeassistant:
     enabled: bool?
     discovery_prefix: str?

@@ -83,6 +83,8 @@ type MQTT struct {
 	Password  string `yaml:"password"`
 	ClientID  string `yaml:"client_id"`
 	BaseTopic string `yaml:"base_topic"`
+	// CloudWebhooks accepts cloud webhook bodies on <base>/<id>/cloud_webhook.
+	CloudWebhooks bool `yaml:"cloud_webhooks"`
 }
 
 type HomeAssistant struct {

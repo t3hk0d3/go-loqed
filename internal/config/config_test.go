@@ -283,3 +283,58 @@ func TestKeyNamesEntryWithoutIDFails(t *testing.T) {
 		t.Fatalf("expected error about id, got %v", err)
 	}
 }
+
+func TestMQTTCloudWebhooksDefaultsOff(t *testing.T) {
+	cfg, err := config.Load(config.Sources{OptionsFile: "/nonexistent/options.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MQTT.CloudWebhooks {
+		t.Fatal("mqtt.cloud_webhooks must default to false")
+	}
+}
+
+func TestMQTTCloudWebhooksFromEachSource(t *testing.T) {
+	for name, src := range map[string]config.Sources{
+		"options.json": {OptionsFile: write(t, "options.json", `{"mqtt":{"cloud_webhooks":true}}`)},
+		"YAML":         {ConfigFile: write(t, "config.yaml", "mqtt:\n  cloud_webhooks: true\n")},
+		"env":          {Environ: []string{"LOQED_MQTT__CLOUD_WEBHOOKS=true"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if src.OptionsFile == "" {
+				src.OptionsFile = "/nonexistent/options.json"
+			}
+			cfg, err := config.Load(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.MQTT.CloudWebhooks {
+				t.Fatalf("%s: cloud_webhooks not set", name)
+			}
+		})
+	}
+}
+
+func TestMQTTCloudWebhooksPrecedence(t *testing.T) {
+	cfg, err := config.Load(config.Sources{
+		OptionsFile: write(t, "options.json", `{"mqtt":{"cloud_webhooks":true}}`),
+		ConfigFile:  write(t, "config.yaml", "mqtt:\n  cloud_webhooks: false\n"),
+		Environ:     []string{"LOQED_MQTT__CLOUD_WEBHOOKS=true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MQTT.CloudWebhooks {
+		t.Fatal("env must override YAML")
+	}
+	cfg, err = config.Load(config.Sources{
+		OptionsFile: write(t, "options.json", `{"mqtt":{"cloud_webhooks":true}}`),
+		ConfigFile:  write(t, "config.yaml", "mqtt:\n  cloud_webhooks: false\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MQTT.CloudWebhooks {
+		t.Fatal("YAML must override options.json")
+	}
+}

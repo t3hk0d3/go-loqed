@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/bridge"
 	"github.com/t3hk0d3/go-loqed/cloud"
 	"github.com/t3hk0d3/go-loqed/cloud/portal"
@@ -135,7 +136,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	mq := mqtt.NewClient(mqtt.ClientConfig{
 		URL: cfg.MQTT.URL, Username: cfg.MQTT.Username, Password: cfg.MQTT.Password, ClientID: cfg.MQTT.ClientID,
-		Topics: topics, Discovery: discovery, Now: now,
+		Topics: topics, Discovery: discovery, CloudWebhooks: cfg.MQTT.CloudWebhooks, Now: now,
 		OnRemovedCleared: func(ids []string) {
 			published.clearPending(ids)
 			savePublished(st, published.persistIDs(), log)
@@ -165,7 +166,7 @@ func Run(ctx context.Context, o Options) error {
 		WebhookURL: func(rec store.LockRecord) (string, error) {
 			return webhook.PrivateURL(cfg.Webhook.PrivateURL, port, rec.ID, rec.BridgeIP)
 		},
-		CloudWebhooks: cfg.Webhook.PublicURL != "",
+		CloudWebhooks: cloudWebhooksConfigured(cfg),
 		SaveCloudWebhookID: func(lockID, id string) error {
 			return st.Update(func(c *store.Cache) {
 				for i := range c.Locks {
@@ -227,7 +228,14 @@ func Run(ctx context.Context, o Options) error {
 				"lock", r.Name, "url", webhook.CloudURL(cfg.Webhook.PublicURL, cloudSecret, r.ID))
 		}
 	}
+	if cfg.MQTT.CloudWebhooks {
+		for _, r := range selected {
+			log.Info("relay this lock's cloud webhooks to its MQTT topic (see the add-on documentation)",
+				"lock", r.Name, "topic", topics.CloudWebhook(mqtt.TopicID(r.ID)))
+		}
+	}
 	go forwardCommands(runCtx, mq, manager, log)
+	go forwardCloudWebhooks(runCtx, mq, manager, log)
 	go refreshByAge(runCtx, refresher, cfg.CacheMaxAge.D(), log)
 	go watchTokenExpiry(runCtx, resolver.CheckExpiry, func(ctx context.Context) {
 		// A new token comes with a new lock key: use both from now on.
@@ -261,6 +269,40 @@ func forwardCommands(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, l
 		case c := <-mq.Commands():
 			if err := m.DeliverCommand(c.LockID, c.Command, c.ID, c.At); err != nil {
 				log.Warn("command not delivered", "lock_id", c.LockID, "err", err)
+			}
+		}
+	}
+}
+
+// cloudWebhooksConfigured: cloud webhooks can arrive over HTTP (public_url)
+// or over MQTT (mqtt.cloud_webhooks); either lets cloud mode rely on push.
+func cloudWebhooksConfigured(cfg config.Config) bool {
+	return cfg.Webhook.PublicURL != "" || cfg.MQTT.CloudWebhooks
+}
+
+// forwardCloudWebhooks hands relayed cloud webhook bodies to the gateway.
+// There is no one to answer, so every rejection is a warning; the body is
+// never logged (it carries personal data).
+func forwardCloudWebhooks(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, log *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case cw := <-mq.CloudWebhooks():
+			ev, err := m.DeliverCloudWebhook(cw.LockID, cw.Body)
+			switch {
+			case err == nil:
+			case errors.Is(err, gateway.ErrCloudIDMismatch):
+				log.Warn("dropped a cloud webhook relayed for another lock; relay each lock's webhook to its own topic",
+					"lock_id", cw.LockID, "cloud_lock_id", ev.LockID)
+			case errors.Is(err, loqed.ErrInvalidPayload):
+				log.Warn("dropped an invalid cloud webhook relayed over MQTT", "lock_id", cw.LockID)
+			case errors.Is(err, gateway.ErrUnknownLock):
+				log.Warn("dropped a cloud webhook for an unknown lock", "lock_id", cw.LockID)
+			case errors.Is(err, gateway.ErrBusy):
+				log.Warn("lock is busy; dropped a cloud webhook", "lock_id", cw.LockID)
+			default:
+				log.Warn("cloud webhook not delivered", "lock_id", cw.LockID)
 			}
 		}
 	}

@@ -179,6 +179,16 @@ func baseConfig(cachePath, broker string) config.Config {
 // that cancels it and waits for a clean return.
 func start(t *testing.T, cfg config.Config, cloudURL string, timing ...func(*gateway.Timing)) (string, func()) {
 	t.Helper()
+	return startWith(t, cfg, cloudURL, func(o *app.Options) {
+		if len(timing) > 0 {
+			o.Timing = timing[0]
+		}
+	})
+}
+
+// startWith is start with full control over the options (log, timing).
+func startWith(t *testing.T, cfg config.Config, cloudURL string, tweak func(*app.Options)) (string, func()) {
+	t.Helper()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +198,7 @@ func start(t *testing.T, cfg config.Config, cloudURL string, timing ...func(*gat
 	go func() {
 		o := app.Options{Config: cfg, Log: slog.New(slog.DiscardHandler), Version: "e2e",
 			CloudBaseURL: cloudURL, Ready: func(addr string) { ready <- addr }}
-		if len(timing) > 0 {
-			o.Timing = timing[0]
-		}
+		tweak(&o)
 		done <- app.Run(ctx, o)
 	}()
 	var addr string
