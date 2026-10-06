@@ -117,7 +117,7 @@ These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged 
 | Item | Outcome |
 |---|---|
 | V1 | ✅ `/api/locks/` returns `bridge_ip`, `bridge_key`, `key_secret`, `local_id`, `backend_key`; lock id is a string (`QnZk…`); `bridge_mac_wifi` came back empty |
-| V2 | open; command calls return per-minute throttle headers only |
+| V2 | ✅ the 12-per-12 h limit applies to status reads only; commands do not count (LOQED, confirmed by the account owner 2026-10-06) |
 | V3 | ✅ create (all triggers), list and delete webhooks work |
 | V4 | ✅ port 80; every incoming bridge webhook verified with `HASH`/`TIMESTAMP` |
 | V5 | values 0–100 (Wi-Fi 20–39, BLE 88–100), `-1` = lock offline → published as `%` |
@@ -356,9 +356,9 @@ Modes: `local`, `cloud`, `offline`.
 
 Account-wide rolling window shared by all locks and cache refreshes: at most `cloud_budget` (default 10, max 12) `GET /api/locks/` calls per rolling 12 h. One `ListLocks` call serves all locks; results are shared for 30 s, except for confirmation polls, which only accept data fetched after the command. Spend priority and reserves: (1) post-command confirmation may use the whole budget; (2) cache refresh leaves 1 call; (3) background state polls leave 2 and are spaced `12h / cloud_budget` apart. Budget is taken only when a request is actually sent (not while no token is available). Background polls are skipped while cloud webhooks are configured and at least one was received in the last `reconcile_interval`; then only one reconcile poll per `reconcile_interval` is made. When exhausted, state is published unchanged with `state_stale: true`. On `ErrRateLimited`, suspend all cloud reads for 12 h and log at error level.
 
-The window (call timestamps) and the 12 h block are persisted in the cache after every change and restored at startup (timestamps in the future are clamped to now), so crash loops and restarts cannot exceed the account limit. Cloud command calls are not refused (a door command must not be blocked by polling) but are recorded in the same window (pending V2), so reads back off after commands; each recorded command logs the window count at info.
+The window (call timestamps) and the 12 h block are persisted in the cache after every change and restored at startup (timestamps in the future are clamped to now), so crash loops and restarts cannot exceed the account limit. Cloud command calls are outside the budget: LOQED's limit applies to status reads only (V2, 2.5). Each cloud command is logged at info.
 
-Worst case per rolling 12 h with defaults: 10 reads + recorded commands (reads stop when commands fill the window). A flapping bridge triggers refreshes at +5 min, +10, +20, +40, +80, +160, +320 (7 in the first 12 h per lock), and refreshes stop at the 1-call reserve.
+Worst case per rolling 12 h with defaults: 10 reads; commands are unlimited by the budget. A flapping bridge triggers refreshes at +5 min, +10, +20, +40, +80, +160, +320 (7 in the first 12 h per lock), and refreshes stop at the 1-call reserve.
 
 ### 5.7 State and event mapping
 
@@ -566,4 +566,4 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.
 - **Mock bridge realism:** the fake bridge and smoke-test mock accept every `/to_lock` with `200 "Message resent to the lock"` and act only on valid signatures with fresh timestamps; emit `GO_TO_STATE_*` after ~3 s and `STATE_CHANGED_*` after 10–16 s (configurable); lag `/status` behind webhooks, with a mode that keeps it stale; emit key 255 for actions without a key, including the automatic latch after open (the fake cloud sends `""`); the fake cloud returns 204 for commands, the `ApiKey` 404 for deleted keys, and sends cloud webhook copies before bridge copies, sometimes twice.
 - **Command pipeline:** one test per effect in the 5.8 skeleton.
-- **Manual:** verification items V2, V8, V9 against a real lock and account before v1 release (V1, V3–V7 recorded in 2.5).
+- **Manual:** verification items V8, V9 against a real lock and account before v1 release (V1, V3–V7 recorded in 2.5).

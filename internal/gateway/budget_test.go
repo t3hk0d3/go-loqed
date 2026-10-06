@@ -118,17 +118,3 @@ func TestBudgetClampsFutureTimestamps(t *testing.T) {
 		t.Fatalf("block must be clamped to 12h: %v", err)
 	}
 }
-
-func TestBudgetRecordCountsCommands(t *testing.T) {
-	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
-	b := newBudget(10, &now)
-	for range 9 {
-		b.Record()
-	}
-	if n := b.Record(); n != 10 {
-		t.Fatalf("count %d", n)
-	}
-	if err := b.Take(PriorityConfirm); !errors.Is(err, ErrBudgetExhausted) {
-		t.Fatalf("commands must count toward reads: %v", err)
-	}
-}

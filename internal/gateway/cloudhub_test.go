@@ -151,14 +151,14 @@ func TestHubRateLimitBlocksBudget(t *testing.T) {
 	}
 }
 
-func TestHubCommandReauthenticatesAndIsRecorded(t *testing.T) {
+func TestHubCommandReauthenticatesOutsideTheBudget(t *testing.T) {
 	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
 	old, fresh := &scriptedAPI{}, &scriptedAPI{}
 	h := newHub(&now, &fakeTokens{token: "old", next: "new"}, map[string]*scriptedAPI{"old": old, "new": fresh})
 	if err := h.Command(context.Background(), "lock1", loqed.BoltNightLock); err != nil {
 		t.Fatal(err)
 	}
-	if old.commands != 1 || fresh.commands != 1 || h.Budget().Remaining() != 8 {
+	if old.commands != 1 || fresh.commands != 1 || h.Budget().Remaining() != 10 {
 		t.Fatalf("old %d fresh %d remaining %d", old.commands, fresh.commands, h.Budget().Remaining())
 	}
 }

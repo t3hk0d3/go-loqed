@@ -100,18 +100,6 @@ func (b *Budget) Take(p Priority) error {
 	return nil
 }
 
-// Record counts a call that must not be refused (a door command) and
-// returns how many calls the window now holds.
-func (b *Budget) Record() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := b.now()
-	b.prune(now)
-	b.calls = append(b.calls, now)
-	b.persistLocked()
-	return len(b.calls)
-}
-
 func (b *Budget) Block(d time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

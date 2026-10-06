@@ -130,8 +130,8 @@ func (h *CloudHub) Locks(ctx context.Context, p Priority, notBefore time.Time) (
 	return res, nil
 }
 
-// Command sends a door command. It is never refused by the budget but is
-// recorded in it (pending V2: LOQED may count commands too). A 401 is
+// Command sends a door command. Commands are outside the budget: LOQED's
+// 12-per-12h limit only applies to status reads (V2). A 401 is
 // retried once with a replacement token: a rejected request did nothing.
 // A deleted lock key is never retried.
 func (h *CloudHub) Command(ctx context.Context, lockID string, s loqed.BoltState) error {
@@ -165,8 +165,7 @@ func (h *CloudHub) Command(ctx context.Context, lockID string, s loqed.BoltState
 }
 
 func (h *CloudHub) command(ctx context.Context, api CloudAPI, lockID string, s loqed.BoltState) error {
-	n := h.budget.Record()
-	h.log.Info("sending cloud command", "lock_id", lockID, "state", s, "cloud_calls_in_window", n)
+	h.log.Info("sending cloud command", "lock_id", lockID, "state", s)
 	ctx, cancel := context.WithTimeout(ctx, cloudTimeout)
 	defer cancel()
 	return api.Command(ctx, lockID, s)

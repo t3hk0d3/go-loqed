@@ -19,6 +19,7 @@ These supersede the matching parts of the tasks below (spec 5.7 is authoritative
 - Cloud and bridge are equal feeds; the first copy of an event is published. Dedup (configurable `event_dedup_enabled`, `event_dedup_window` 10 s, max 30 s) drops a repeat of the latest published event and the other feed's copy of a recent event (feeds interleave).
 - `source` is `gateway` or null; no parsed categories (`touch`, `remote`, `unknown`, …).
 - `GO_TO_STATE_*_VIA_OUTSIDE_MODULE_PIN` targets open.
+- V2 answered: the cloud budget covers status reads only; cloud commands are no longer recorded in it (`Budget.Record` removed). This supersedes "cloud commands are never refused but are recorded" in the gateway plan's Global Constraints.
 
 ## Styleguide
 
