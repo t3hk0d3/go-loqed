@@ -1,7 +1,7 @@
 # go-loqed: LOQED library + loqed-mqtt gateway — Design
 
 Date: 2026-10-04
-Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1)
+Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1); revised 2026-10-06: cloud webhooks over MQTT (rev 2.2)
 
 **Rev 2.1 (2026-10-05)** — all changes come from tests against a real LOQED Touch, bridge and account (2.5):
 - Command pipeline redesigned (5.8): latest command wins, retries only when a request provably never left, 30 s / 10 s deadlines, local-then-cloud, confirmation from webhooks, retained `command_status` topic.
@@ -10,6 +10,11 @@ Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revi
 - Cloud webhooks carry the numeric internal lock id, not the API id → one cloud webhook URL per lock (5.4, 7); duplicate deliveries are dropped; cloud events may arrive before bridge events (5.7).
 - Token lifetime and lock-key lifecycle: tokens expire (~182 days); revoking or expiring a token does not revoke its lock key; deleting the key in the app does (5.2).
 - Portal login sends `remember: false` (4.3).
+
+**Rev 2.2 (2026-10-06)** — cloud webhooks can also arrive over MQTT:
+- New per-lock topic `<base>/<id>/cloud_webhook` (6.1) carrying a cloud webhook body, enabled by `mqtt.cloud_webhooks` (5.1). It lets a relay that the user already runs, typically a Home Assistant automation with a Nabu Casa webhook trigger, feed cloud webhooks without a reverse proxy or a public URL (9).
+- HTTP and MQTT deliveries go through one decode-and-route path; per-lock routing and the `cloud_webhook_id` binding are unchanged (7).
+- LOQED's web API article shows an alphanumeric `lock_id` and `key_account_e-mail`; real payloads differ (2.2). Test fixtures use the real shapes; one documented-shape fixture stays.
 
 ## 1. Purpose and context
 
@@ -80,6 +85,7 @@ Public, documented API. This is what the rest of this spec calls "cloud".
   - Going to state: `{event_type, go_to_state, lock_id, key_local_id, key_name_user, …same personal fields…}`.
   - Signal: `{ble_strength, wifi_strength, lock_id}`; battery: `{battery_percentage, lock_id}`; online: `{online: 0|1, lock_id}`.
   - `lock_id` is the **numeric internal id** (e.g. `6148`), not the `/api/locks/` id; the API does not expose it. `key_local_id` is a string (`"1"`), `""` when no key was involved. `value1..value3` are IFTTT-style fields (`value2` = key name, `value3` = **account e-mail in plain text**); like the other personal fields they are never decoded or logged.
+  - LOQED's web API article (support.loqed.com, article 6127911, checked 2026-10-06) shows a different shape: an alphanumeric `lock_id` like the `/api/locks/` id, `key_account_e-mail`, a numeric `key_local_id`, one combined signal/battery event, and no `value1..3`. Nothing received so far matches it. Parsing accepts both shapes; routing never relies on `lock_id` (7).
   - Each event may be delivered twice ~4 s apart, and cloud copies usually arrive 0.1–0.8 s **before** the bridge webhook for the same event.
 
 ### 2.3 Integrations portal / Management API (`https://integrations.production.loqed.com`)
@@ -109,6 +115,7 @@ Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (f
 - V8: Home Assistant OS: the add-on (host network) resolves the `host` returned by `/services/mqtt` (`core-mosquitto`); the add-on options form renders `lock_settings`; `/data/options.json` validates with defaults only.
 
 - V9 (new): whether deleted key slots stay deleted across token re-mints; the exact stale-timestamp tolerance of the lock.
+- V10 (rev 2.2): the Home Assistant relay end to end: a webhook trigger reached through its Nabu Casa URL receives LOQED's JSON body as `trigger.json`; the documented template publishes only the fields listed in 6.1, as valid JSON with numbers kept as numbers; the gateway applies the event with no personal field on the broker.
 
 These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged until each has a recorded outcome.
 
@@ -259,6 +266,7 @@ mqtt:
   password: ""
   client_id: loqed-mqtt
   base_topic: loqed
+  cloud_webhooks: false      # accept cloud webhook bodies on <base>/<id>/cloud_webhook (6.1); counts as "cloud webhooks configured"
 homeassistant:
   enabled: true
   discovery_prefix: homeassistant
@@ -314,10 +322,12 @@ Locks whose cloud data lacks local credentials and have no manual credentials in
 3. Apply allow-list; build per-lock `bridge.Client` (when credentials exist).
 4. Start webhook listener, MQTT client, and one supervisor goroutine per lock.
 5. Publish discovery (if enabled), availability, and initial state. Remove retained topics (discovery, state, availability) for ids in `published_ids` that are no longer selected, then store the new `published_ids`. The same removal runs whenever a runtime refresh drops a lock.
-6. If `webhook.public_url` is set, log each lock's cloud webhook URL (`<public_url>/cloud/<cloud_secret>/<lock-id>`) once at info level so the user can register it for that lock at app.loqed.com.
+6. If `webhook.public_url` is set, log each lock's cloud webhook URL (`<public_url>/cloud/<cloud_secret>/<lock-id>`) once at info level so the user can register it for that lock at app.loqed.com. If `mqtt.cloud_webhooks` is set, log each lock's `cloud_webhook` topic once at info level.
 7. A shutdown signal during startup is a clean exit (status 0).
 
 ### 5.5 Per-lock supervisor and failover (`internal/gateway`)
+
+"Cloud webhooks configured" (used below and in 5.7) means `webhook.public_url` is set or `mqtt.cloud_webhooks` is true. It is configuration only: it does not depend on webhooks actually arriving.
 
 One goroutine per lock owns all its state; inputs (webhook events, MQTT commands, timers) arrive on channels. A failure in one lock never affects others.
 
@@ -489,6 +499,15 @@ Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT
 | `<base>/<id>/event` | **no** | JSON `{event_type, reason, source, key_local_id, key_name}` (+ `error` for `command_failed`) |
 | `<base>/<id>/command` | no (subscribe, QoS 1) | `LOCK`/`UNLOCK`/`OPEN`, or JSON `{"command":"UNLOCK","id":"<client id>"}` |
 | `<base>/<id>/command_status` | yes | JSON command status (5.8) |
+| `<base>/<id>/cloud_webhook` | no (subscribe, QoS 1; only with `mqtt.cloud_webhooks`) | a cloud webhook body as LOQED sends it (2.2), or reduced to the fields the gateway reads |
+
+**`cloud_webhook` input:**
+- Subscribed as `<base>/+/cloud_webhook` after every (re)connect, only when `mqtt.cloud_webhooks` is true.
+- Retained messages are ignored with a warning (a retained event would replay stale state on every reconnect). Messages for an unknown `<id>` are ignored with a warning. Payloads over 64 KiB are dropped.
+- The payload is decoded and routed exactly like `POST /cloud/<secret>/<lock-id>` (7): the topic's `<id>` selects the lock, and the body's `lock_id` is bound as `cloud_webhook_id` on first use. A mismatching `lock_id`, an undecodable payload or a full queue drops the message with a warning (QoS 1 is already acknowledged; there is no reply channel). The payload is never logged.
+- Fields the gateway reads: `lock_id`, `event_type`, `requested_state`, `go_to_state`, `key_local_id`, `key_name_user`, `battery_percentage`, `wifi_strength`, `ble_strength`, `online`. Relays should publish only these, so the account e-mail (`key_account_email`, `value3`) and names never reach the broker; the gateway ignores every other field either way.
+- Trust: anyone allowed to publish to `<base>/<id>/cloud_webhook` can inject lock events, which is less than what publishing to `<base>/<id>/command` allows. Broker ACLs are the protection, as for commands.
+- Duplicates from QoS 1 redelivery or a relay retry are dropped by the event dedup (5.7) like any repeat.
 
 State document:
 ```json
@@ -529,7 +548,7 @@ Components per lock:
 One HTTP listener (`webhook.listen`) serves:
 
 - `POST /webhook/<lock-id>` (bridge, private): look up lock (unknown → 404); missing `TIMESTAMP`/`HASH` → 400; verify via `bridge.ParseEvent` (bad hash → 401, stale timestamp → 401 and log observed clock skew; only reachable with a valid hash); forward to supervisor (queue full → 503); 200.
-- `POST /cloud/<cloud_secret>/<lock-id>` (cloud, public): only routed when `public_url` is set; wrong secret → 404 (constant-time compare); unknown `<lock-id>` → 404; decode via `cloud.ParseWebhook`; route by the **path** lock id (the body's numeric `lock_id` is stored as `cloud_webhook_id` on first use and later bodies with a different numeric id are rejected with 409 and a warning); forward to supervisor; 200. The path secret is the only authentication (see V6); it is 32 random bytes, base64url, and never logged except in the one startup line.
+- `POST /cloud/<cloud_secret>/<lock-id>` (cloud, public): only routed when `public_url` is set; wrong secret → 404 (constant-time compare); unknown `<lock-id>` → 404; decode via `cloud.ParseWebhook` (the same decode-and-route path as the MQTT `cloud_webhook` topic, 6.1); route by the **path** lock id (the body's numeric `lock_id` is stored as `cloud_webhook_id` on first use and later bodies with a different numeric id are rejected with 409 and a warning); forward to supervisor; 200. The path secret is the only authentication (see V6); it is 32 random bytes, base64url, and never logged except in the one startup line.
 - `GET /healthz`: 200 with JSON `{mqtt_connected, locks: {<id>: {mode, available, last_event_at}}}`; 503 only if MQTT has been disconnected for more than 5 minutes (so a broker restart does not make the add-on watchdog restart the gateway).
 - Body size limit 64 KiB on both webhook routes. Server timeouts: read header 5 s, read 15 s, write 15 s, idle 60 s. If the listener fails at runtime, `Run` returns the error (the process exits non-zero and is restarted) instead of silently running without webhooks.
 
@@ -552,18 +571,18 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **Dockerfile:** multi-stage; `CGO_ENABLED=0` static binary. Two final targets: `standalone` on `gcr.io/distroless/static-debian12:nonroot` with a `/data` directory owned by uid 65532 (so named volumes are writable), and `addon` on `gcr.io/distroless/static-debian12` (root; the Supervisor's `/data` is root-owned). Exec-form `HEALTHCHECK` runs `loqed-mqtt healthcheck`, which calls `/healthz` on the configured listen address (an unspecified host maps to 127.0.0.1). `LABEL org.opencontainers.image.source` links the package to the repo.
 - **Images:** standalone `ghcr.io/t3hk0d3/loqed-mqtt` for `linux/amd64`, `linux/arm64`, `linux/arm/v7`; add-on `ghcr.io/t3hk0d3/loqed-mqtt-addon` for `linux/amd64`, `linux/arm64`. Pushed by GitHub Actions on `v*` tags after tests pass; `latest` only for non-prerelease tags. Packages must be made public once after the first push (documented release step).
 - **docker-compose.yml:** `network_mode: host` (so auto-detected webhook URL is the real LAN IP), named volume for `/data`, env-based config.
-- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt-addon` (prebuilt; no `build.yaml`, no local build: current Supervisor no longer passes `BUILD_FROM`), `arch: [amd64, aarch64]`, `host_network: true` (so no `ports`), `services: [mqtt:need]`, persistent `/data`, options schema mirroring 5.1 with nesting depth ≤ 2 (`lock_settings` is a list of objects whose `key_names` is a `"1=Alice,3=Bob"` string; every nested key has a default; `webhook.listen` is not exposed), `cloud_token` and `cloud_password` as `password?`, `watchdog` on `/healthz`. Release order: push the tag (images) first, then bump `addon/config.yaml` `version`. `DOCS.md` covers token vs email/password setup, the `lock_settings`/`key_names` format, NTP requirement, best-effort events, the cloud rate limit, `private_url` when not on host networking, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering each lock's logged URL for that lock at app.loqed.com), the firewall rule needed on segmented networks (bridge → gateway webhook port), removing stale webhooks from the bridge (each target delays events), deleting the gateway's key in the LOQED app to revoke its access (revoking the token is not enough), the `command_status` topic and JSON command payload, and recalibrating the lock if UNLOCK opens the door.
+- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt-addon` (prebuilt; no `build.yaml`, no local build: current Supervisor no longer passes `BUILD_FROM`), `arch: [amd64, aarch64]`, `host_network: true` (so no `ports`), `services: [mqtt:need]`, persistent `/data`, options schema mirroring 5.1 with nesting depth ≤ 2 (`lock_settings` is a list of objects whose `key_names` is a `"1=Alice,3=Bob"` string; every nested key has a default; `webhook.listen` is not exposed), `cloud_token` and `cloud_password` as `password?`, `watchdog` on `/healthz`. Release order: push the tag (images) first, then bump `addon/config.yaml` `version`. `DOCS.md` covers token vs email/password setup, the `lock_settings`/`key_names` format, NTP requirement, best-effort events, the cloud rate limit, `private_url` when not on host networking, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering each lock's logged URL for that lock at app.loqed.com; or, without a reverse proxy, a Home Assistant automation with one webhook trigger per lock, not local-only, whose Nabu Casa URL is registered for that lock and which publishes the reduced body non-retained to that lock's `cloud_webhook` topic), the firewall rule needed on segmented networks (bridge → gateway webhook port), removing stale webhooks from the bridge (each target delays events), deleting the gateway's key in the LOQED app to revoke its access (revoking the token is not enough), the `command_status` topic and JSON command payload, and recalibrating the lock if UNLOCK opens the door.
 
 ## 10. Testing
 
-- **bridge/cloud:** table tests against `httptest` servers using fixture payloads for status, webhook list, and every bridge and cloud event family (including `MOTOR_STALL`, `*_REMOTE`, null `key_local_id`, string-typed numbers). Cloud webhook parsing must not expose e-mail/account fields. Error mapping tests for 401/403/429/5xx/timeouts.
+- **bridge/cloud:** table tests against `httptest` servers using fixture payloads for status, webhook list, and every bridge and cloud event family (including `MOTOR_STALL`, `*_REMOTE`, null `key_local_id`, string-typed numbers). Cloud webhook parsing must not expose e-mail/account fields. Cloud webhook fixtures use the shapes actually received (numeric `lock_id`, string `key_local_id`, separate signal/battery events, `key_account_email`, `value1..3`), plus one fixture in the documented shape. Error mapping tests for 401/403/429/5xx/timeouts.
 - **cloud/portal:** fake Laravel/Inertia server: XSRF cookie handling, login success/failure, Inertia version 409 retry, token create/list/revoke, changed-props → `ErrInvalidPayload`.
 - **Golden vectors:** signed command bytes and all webhook hashes generated once from `loqedAPI` 2.1.16 with fixed clock and keys; Go output must match byte-for-byte. Generator script committed under `testdata/`.
 - **gateway:** state-machine tests with fake bridge/cloud interfaces and an injectable clock: local→cloud→offline→local, IP-change refresh, auth-error refresh, command fallback to cloud **only** on `ErrUnreachable` (never on `ErrNoResponse`), command deadline, stale-command drop, missed-webhook `/status` fallback, lost `STATE_CHANGED` after `GO_TO_STATE`, TCP-up/HTTP-hung bridge fails over, nil bridge client never used, unknown-state recovery limit, budget exhaustion, budget persistence across restart, refresh backoff under a flapping bridge, confirmation poll ignores pre-command cached data, 429 backoff, cloud-only locks, cloud probe-based offline detection and 5 min recovery, token minting and re-mint on 401, cloud-webhook push in `cloud` mode, cloud→bridge event enrichment and 30 s matching window in `local` mode. At least one test runs the supervisor against the real `CloudHub` + `Budget` (only the HTTP API faked).
 - **store:** atomic write, `0600`, token-hash mismatch, corrupt file handling, minted token and generated secret persistence.
-- **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored.
+- **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored; `cloud_webhook` messages reach the gateway only when enabled and not retained.
 - **Integration:** run the gateway against an in-process MQTT broker (`mochi-mqtt/server`) and fake bridge/cloud servers: discovery published → command in → signed bridge call out → webhook in → state and event published.
 - **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.
 - **Mock bridge realism:** the fake bridge and smoke-test mock accept every `/to_lock` with `200 "Message resent to the lock"` and act only on valid signatures with fresh timestamps; emit `GO_TO_STATE_*` after ~3 s and `STATE_CHANGED_*` after 10–16 s (configurable); lag `/status` behind webhooks, with a mode that keeps it stale; emit key 255 for actions without a key, including the automatic latch after open (the fake cloud sends `""`); the fake cloud returns 204 for commands, the `ApiKey` 404 for deleted keys, and sends cloud webhook copies before bridge copies, sometimes twice.
 - **Command pipeline:** one test per effect in the 5.8 skeleton.
-- **Manual:** verification items V8, V9 against a real lock and account before v1 release (V1, V3–V7 recorded in 2.5).
+- **Manual:** verification items V8, V9, V10 against a real lock and account before v1 release (V1, V3–V7 recorded in 2.5).
