@@ -14,6 +14,7 @@ Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revi
 **Rev 2.2 (2026-10-06)** — cloud webhooks can also arrive over MQTT:
 - New per-lock topic `<base>/<id>/cloud_webhook` (6.1) carrying a cloud webhook body, enabled by `mqtt.cloud_webhooks` (5.1). It lets a relay that the user already runs, typically a Home Assistant automation with a Nabu Casa webhook trigger, feed cloud webhooks without a reverse proxy or a public URL (9).
 - HTTP and MQTT deliveries go through one decode-and-route path; per-lock routing and the `cloud_webhook_id` binding are unchanged (7).
+- `internal/hass` is split into `internal/mqtt` (MQTT client and the gateway's topics) and `internal/mqtt/hass-discovery` (Home Assistant discovery) (3).
 - LOQED's web API article shows an alphanumeric `lock_id` and `key_account_e-mail`; real payloads differ (2.2). Test fixtures use the real shapes; one documented-shape fixture stays.
 
 ## 1. Purpose and context
@@ -147,7 +148,8 @@ go-loqed/                      module github.com/t3hk0d3/go-loqed
 │   ├── store/                 credential cache (/data/locks.json), minted token, cloud webhook secret
 │   ├── gateway/               per-lock supervisors, failover, cloud budget
 │   ├── webhook/               HTTP listener, routing to supervisors, /healthz
-│   └── hass/                  MQTT client, topics, discovery, state/event publishing
+│   └── mqtt/                  MQTT client, topics, state/event/command_status publishing, command and cloud_webhook inputs
+│       └── hass-discovery/    Home Assistant discovery documents and topics (package hassdiscovery)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── addon/                     HA add-on (config.yaml, DOCS.md, translations)
@@ -159,8 +161,9 @@ The existing 2023 draft (`pkg/loqed_bridge_api`) is replaced; only its type/test
 Dependency rules:
 - `bridge`, `cloud` and `cloud/portal` import only the standard library (plus `golang.org/x/net/publicsuffix` for the portal cookie jar if needed). No goroutines, timers or persistent state; the portal client's session lives only inside one `Login`-scoped value.
 - `internal/gateway` is the only package that knows about local vs cloud.
-- `internal/hass` is the only package that imports the MQTT library or knows topic names.
-- `gateway` ↔ `hass` communicate via a small interface (publish state, publish event, publish availability) and a command channel.
+- `internal/mqtt` is the only package that imports the MQTT library. It owns the gateway's own topics (`<base>/…`) and knows nothing about Home Assistant.
+- `internal/mqtt/hass-discovery` (package `hassdiscovery`) owns everything Home Assistant specific: discovery documents, the discovery topic and HA's birth topic. It imports `internal/mqtt` for `Topics`, `TopicID` and `LockInfo`, never the MQTT library. The MQTT client receives it through a small `mqtt.Discovery` interface; with `homeassistant.enabled: false` no implementation is passed and nothing HA specific is subscribed or published.
+- `gateway` ↔ `mqtt` communicate via a small interface (publish state, publish event, publish availability) and input channels (commands, cloud webhooks); `internal/app` wires them.
 
 ## 4. GoLoqed library
 
@@ -485,7 +488,7 @@ CommandPipeline (internal/gateway)
             - keeps state_stale until a webhook or later read resolves it
 ```
 
-## 6. MQTT and Home Assistant (`internal/hass`)
+## 6. MQTT and Home Assistant (`internal/mqtt`, `internal/mqtt/hass-discovery`)
 
 Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT. On reconnect: resubscribe, republish discovery (if enabled), availability and current state. The reconnect republish always reads the latest cached document at publish time, so it can never overwrite a newer state with an older one. Messages on the command topic with the retain flag set are ignored.
 
@@ -580,7 +583,7 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **Golden vectors:** signed command bytes and all webhook hashes generated once from `loqedAPI` 2.1.16 with fixed clock and keys; Go output must match byte-for-byte. Generator script committed under `testdata/`.
 - **gateway:** state-machine tests with fake bridge/cloud interfaces and an injectable clock: local→cloud→offline→local, IP-change refresh, auth-error refresh, command fallback to cloud **only** on `ErrUnreachable` (never on `ErrNoResponse`), command deadline, stale-command drop, missed-webhook `/status` fallback, lost `STATE_CHANGED` after `GO_TO_STATE`, TCP-up/HTTP-hung bridge fails over, nil bridge client never used, unknown-state recovery limit, budget exhaustion, budget persistence across restart, refresh backoff under a flapping bridge, confirmation poll ignores pre-command cached data, 429 backoff, cloud-only locks, cloud probe-based offline detection and 5 min recovery, token minting and re-mint on 401, cloud-webhook push in `cloud` mode, cloud→bridge event enrichment and 30 s matching window in `local` mode. At least one test runs the supervisor against the real `CloudHub` + `Budget` (only the HTTP API faked).
 - **store:** atomic write, `0600`, token-hash mismatch, corrupt file handling, minted token and generated secret persistence.
-- **hass:** golden JSON for discovery and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored; `cloud_webhook` messages reach the gateway only when enabled and not retained.
+- **mqtt / hass-discovery:** golden JSON for discovery (in `hass-discovery`) and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored; `cloud_webhook` messages reach the gateway only when enabled and not retained.
 - **Integration:** run the gateway against an in-process MQTT broker (`mochi-mqtt/server`) and fake bridge/cloud servers: discovery published → command in → signed bridge call out → webhook in → state and event published.
 - **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.
 - **Mock bridge realism:** the fake bridge and smoke-test mock accept every `/to_lock` with `200 "Message resent to the lock"` and act only on valid signatures with fresh timestamps; emit `GO_TO_STATE_*` after ~3 s and `STATE_CHANGED_*` after 10–16 s (configurable); lag `/status` behind webhooks, with a mode that keeps it stale; emit key 255 for actions without a key, including the automatic latch after open (the fake cloud sends `""`); the fake cloud returns 204 for commands, the `ApiKey` 404 for deleted keys, and sends cloud webhook copies before bridge copies, sometimes twice.

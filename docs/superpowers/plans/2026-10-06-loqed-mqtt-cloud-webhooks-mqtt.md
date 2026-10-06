@@ -5,10 +5,11 @@
 **Goal:** Accept LOQED cloud webhook bodies on a per-lock MQTT topic, so a Home Assistant automation with a Nabu Casa webhook trigger can feed cloud webhooks without a reverse proxy.
 
 **Architecture:**
-- `internal/hass` subscribes to `<base>/+/cloud_webhook` when the feature is enabled. It filters out retained, unknown-lock and oversized messages, and hands the raw body plus the real lock id to the app over a channel.
+- First, `internal/hass` is split into `internal/mqtt` (MQTT client and the gateway's own topics) and `internal/mqtt/hass-discovery` (package `hassdiscovery`, Home Assistant discovery). The client gets discovery through a small interface, so the MQTT layer knows nothing about Home Assistant.
+- `internal/mqtt` subscribes to `<base>/+/cloud_webhook` when the feature is enabled. It filters out retained, unknown-lock and oversized messages, and hands the raw body plus the real lock id to the app over a channel.
 - The app forwards each body to one new gateway entry point, `Manager.DeliverCloudWebhook`. That function decodes and routes the body exactly as the HTTP `/cloud/<secret>/<lock-id>` route does. The HTTP route is refactored to call the same function, so both inputs share the binding rules.
 
-**Tech Stack:** Go 1.27, `log/slog`, paho MQTT (only in `internal/hass`), in-process mochi broker for tests (`internal/testutil`).
+**Tech Stack:** Go 1.27, `log/slog`, paho MQTT (only in `internal/mqtt`), in-process mochi broker for tests (`internal/testutil`).
 
 **Spec:** `docs/superpowers/specs/2026-10-04-loqed-mqtt-gateway-design.md`, rev 2.2. The relevant sections:
 - the rev 2.2 header;
@@ -28,7 +29,7 @@
 
 The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) together with `.golangci.yml` (golangci-lint v2.14.0; gofmt). Every task follows it. The rules that matter most here:
 
-- `internal/hass` is the only package that imports the MQTT library or knows topic names. `internal/gateway` is the only package that knows lock modes and the cloud-id binding. `internal/app` only wires them together.
+- `internal/mqtt` is the only package that imports the MQTT library; it owns the gateway's `<base>/…` topics and knows nothing about Home Assistant. `internal/mqtt/hass-discovery` (package `hassdiscovery`) owns discovery documents, the discovery topic and HA's birth topic; it imports `internal/mqtt`, never the MQTT library. `internal/gateway` is the only package that knows lock modes and the cloud-id binding. `internal/app` only wires them together.
 - Errors are wrapped with `%w` around existing sentinels: `loqed.ErrInvalidPayload`, `gateway.ErrUnknownLock`, `gateway.ErrCloudIDMismatch` and `gateway.ErrBusy`. Callers branch with `errors.Is`.
 - Cloud webhook bodies are never logged, at any level. Log lines carry `lock_id`, the topic and, for a mismatch, the numeric `cloud_lock_id`, and nothing else from the payload.
 - Tests:
@@ -40,7 +41,7 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 
 ## Global Constraints
 
-- Topic: `<base>/<id>/cloud_webhook`, where `<id>` is the same topic id as in `<base>/<id>/command` (`hass.TopicID(lockID)`). Subscription: `<base>/+/cloud_webhook`, QoS 1, re-established on every reconnect.
+- Topic: `<base>/<id>/cloud_webhook`, where `<id>` is the same topic id as in `<base>/<id>/command` (`mqtt.TopicID(lockID)`). Subscription: `<base>/+/cloud_webhook`, QoS 1, re-established on every reconnect.
 - Subscribed only when `mqtt.cloud_webhooks` is `true`. The default is `false`.
 - "Cloud webhooks configured" (the gateway's `Deps.CloudWebhooks`) = `webhook.public_url != ""` **or** `mqtt.cloud_webhooks`.
 - Retained `cloud_webhook` messages are ignored with a warning. Messages for an unknown topic id are ignored with a warning. Payloads over **64 KiB** are dropped with a warning.
@@ -61,23 +62,26 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 
 ## Review Focus
 
-1. **A retained `cloud_webhook` message left on the broker** (a relay configured with `retain: true`). It must never be applied, at first connect or on any reconnect, and the warning must say to publish without retain. Test: Task 2, `TestCloudWebhookRetainedIgnored`, covering the initial connect and a reconnect.
-2. **Feature disabled but someone publishes to the topic.** Nothing reaches the gateway, because there is no subscription. Test: Task 2, `TestCloudWebhookNotSubscribedWhenDisabled`.
-3. **The relay posts one lock's events to another lock's topic** (wrong trigger id in a shared automation). The first event binds; a later different numeric id is dropped with a warning naming both ids, and the lock's state is unchanged. Test: Task 3, `TestCloudWebhookOverMQTTMismatchDropped`.
-4. **The full body, including the e-mail and `value1..3`, arrives over MQTT (the documented relay forwards it as-is).** It is applied, and no log line contains the personal values. Test: Task 3, `TestCloudWebhookOverMQTTNeverLogsPayload`.
-5. **The same event arrives over MQTT and over the bridge, or twice over MQTT** (QoS 1 redelivery). It is published once. Test: Task 3, `TestCloudWebhookOverMQTTDeduplicated`.
+1. **A retained `cloud_webhook` message left on the broker** (a relay configured with `retain: true`). It must never be applied, at first connect or on any reconnect, and the warning must say to publish without retain. Test: Task 3, `TestCloudWebhookRetainedIgnored`, covering the initial connect and a reconnect.
+2. **Feature disabled but someone publishes to the topic.** Nothing reaches the gateway, because there is no subscription. Test: Task 3, `TestCloudWebhookNotSubscribedWhenDisabled`.
+3. **The relay posts one lock's events to another lock's topic** (wrong trigger id in a shared automation). The first event binds; a later different numeric id is dropped with a warning naming both ids, and the lock's state is unchanged. Test: Task 4, `TestCloudWebhookOverMQTTMismatchDropped`.
+4. **The full body, including the e-mail and `value1..3`, arrives over MQTT (the documented relay forwards it as-is).** It is applied, and no log line contains the personal values. Test: Task 4, `TestCloudWebhookOverMQTTNeverLogsPayload`.
+5. **The same event arrives over MQTT and over the bridge, or twice over MQTT** (QoS 1 redelivery). It is published once. Test: Task 4, `TestCloudWebhookOverMQTTDeduplicated`.
 
 ## File Structure
 
 | File | Change |
 |---|---|
+| `internal/hass/*` → `internal/mqtt/*` | client, topics and their tests move; package `mqtt`; paho imported as `paho` |
+| `internal/mqtt/hass-discovery/` (package `hassdiscovery`) | discovery payload, discovery topic, HA birth topic, golden file and tests move here |
+| `internal/app/app.go`, `CLAUDE.md` | imports, wiring of the discovery implementation, layout and `-update` command |
 | `internal/gateway/manager.go` | add `DeliverCloudWebhook(lockID string, body []byte) (cloud.WebhookEvent, error)` (decode + bind + deliver); `DeliverCloudEvent` stays as the typed entry point it calls |
 | `internal/gateway/manager_test.go` | tests for `DeliverCloudWebhook` |
 | `internal/webhook/handler.go` | cloud route calls `DeliverCloudWebhook`; status mapping by error; `Sink` interface gains `DeliverCloudWebhook` |
 | `internal/webhook/handler_test.go` | existing cloud-route tests keep passing; fake sink updated |
-| `internal/hass/topics.go` | `CloudWebhook(id)`, `CloudWebhookWildcard()` |
-| `internal/hass/client.go` | `ClientConfig.CloudWebhooks`, `type CloudWebhook`, `CloudWebhooks() <-chan CloudWebhook`, subscription in `onConnect`, `onCloudWebhook` filter |
-| `internal/hass/client_test.go` | broker tests for the filter rules |
+| `internal/mqtt/topics.go` | `CloudWebhook(id)`, `CloudWebhookWildcard()` |
+| `internal/mqtt/client.go` | `ClientConfig.CloudWebhooks`, `type CloudWebhook`, `CloudWebhooks() <-chan CloudWebhook`, subscription in `onConnect`, `onCloudWebhook` filter |
+| `internal/mqtt/client_test.go` | broker tests for the filter rules |
 | `internal/config/config.go`, `config_test.go` | `MQTT.CloudWebhooks bool` (`yaml:"cloud_webhooks"`), env `LOQED_MQTT__CLOUD_WEBHOOKS` via the existing mechanism |
 | `internal/app/app.go` | `Deps.CloudWebhooks` from either source; `ClientConfig.CloudWebhooks`; `forwardCloudWebhooks` goroutine; per-lock topic log at startup |
 | `internal/app/app_test.go` | end-to-end over the in-process broker |
@@ -87,7 +91,70 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 
 ---
 
-### Task 1: Gateway — one decode-and-route path for cloud webhooks
+### Task 1: Split `internal/hass` into `internal/mqtt` and `internal/mqtt/hass-discovery`
+
+**Files:**
+- Move: `internal/hass/client.go`, `client_test.go`, `topics.go` → `internal/mqtt/` (package `mqtt`; the paho import is aliased `paho` to avoid confusion with the package name)
+- Move: `internal/hass/discovery.go`, `discovery_test.go`, `testdata/discovery_lock1.golden.json` → `internal/mqtt/hass-discovery/` (package `hassdiscovery`)
+- Modify: `internal/app/app.go`, `internal/app/app_test.go`, `CLAUDE.md` (layout table, dependency rule, golden `-update` command)
+- Delete: `internal/hass/`
+
+**Interfaces:**
+- Consumes: the current `hass` API (`Client`, `ClientConfig`, `Topics`, `TopicID`, `LockInfo`, `DiscoveryPayload`).
+- Produces, in `internal/mqtt`:
+  - `Client`, `ClientConfig`, `Command`, `LockInfo`, `TopicID`, unchanged apart from the package name;
+  - `Topics{Base string}` without `DiscoveryPrefix`, `Discovery()` or `HAStatus()`;
+  - `type Discovery interface { BirthTopic() string; Topic(lockID string) string; Payload(l LockInfo) ([]byte, error) }`;
+  - `ClientConfig.Discovery Discovery` replaces `ClientConfig.HAEnabled`: nil means Home Assistant is off.
+- Produces, in `internal/mqtt/hass-discovery` (package `hassdiscovery`):
+  - `func New(prefix string, topics mqtt.Topics, version string) *Discovery`;
+  - `*Discovery` implements `mqtt.Discovery`. The discovery topic, the birth topic and the payload are identical to today's.
+- `internal/app` builds `hassdiscovery.New(...)` only when `homeassistant.enabled` is true and passes it as `ClientConfig.Discovery`.
+
+**BDD skeleton**
+
+```
+hassdiscovery.Discovery
+    Topic
+        - returns "<prefix>/device/loqed_<topic id>/config" (same as before the split)
+    BirthTopic
+        - returns "<prefix>/status"
+    Payload
+        - matches the existing golden file byte for byte (golden file moved, not regenerated)
+
+mqtt.Client
+    onConnect
+        With a Discovery
+            - publishes each lock's discovery payload, retained, to Discovery.Topic(lock id)
+            - subscribes to Discovery.BirthTopic(); an "online" message republishes discovery
+        With Discovery nil
+            - publishes no discovery and subscribes to no Home Assistant topic
+    SetLocks
+        With a Discovery, on a removed lock
+            - clears its retained discovery topic (empty payload) along with its other retained topics
+        With Discovery nil, on a removed lock
+            - clears its other retained topics; touches no discovery topic
+
+Package boundaries
+    - only internal/mqtt imports github.com/eclipse/paho.mqtt.golang
+    - internal/mqtt imports nothing from internal/mqtt/hass-discovery
+```
+
+- [ ] **Step 1:** Move the files with `git mv` (keeps history), rename the packages and fix imports. Run `go build ./...`. Expected: success.
+- [ ] **Step 2:** Write the new tests from the skeleton:
+  - the `Discovery`-nil client tests, replacing the `HAEnabled=false` ones;
+  - the topic tests in `hassdiscovery`;
+  - a boundary test that fails if a package other than `internal/mqtt` imports paho, or if `internal/mqtt` imports `hass-discovery`. It uses `go list -deps -json` or `go/build`.
+- [ ] **Step 3:** Run `go test ./internal/mqtt/... ./internal/app`. Expected: FAIL on the new tests only.
+- [ ] **Step 4:** Introduce the `mqtt.Discovery` interface and implement it in `hassdiscovery`. Move the discovery-topic and birth-topic knowledge out of `Topics`, and wire it in `internal/app`.
+- [ ] **Step 5:** Run `gofmt -l .`, `go vet ./...`, `go test -race ./...`, `go test -race -count=8 ./internal/mqtt/...` and golangci-lint. Expected: all clean. The golden file has no diff.
+- [ ] **Step 6:** Update `CLAUDE.md`:
+  - the layout table;
+  - the dependency rule (`internal/mqtt` is the only importer of the MQTT library; `hass-discovery` holds everything HA specific);
+  - the `-update` command, which becomes `go test ./internal/mqtt/hass-discovery -run TestDiscoveryPayload -update`.
+- [ ] **Step 7:** Commit with the message `mqtt: split MQTT client from Home Assistant discovery`.
+
+### Task 2: Gateway — one decode-and-route path for cloud webhooks
 
 **Files:**
 - Modify: `internal/gateway/manager.go`, `internal/webhook/handler.go`
@@ -139,15 +206,15 @@ Webhook handler
 - [ ] **Step 5:** Run `go test -race ./internal/gateway ./internal/webhook`. Expected: PASS, with the existing handler tests unchanged.
 - [ ] **Step 6:** Commit with the message `gateway: one decode-and-route path for cloud webhooks`.
 
-### Task 2: MQTT — `cloud_webhook` topic input
+### Task 3: MQTT — `cloud_webhook` topic input
 
 **Files:**
-- Modify: `internal/hass/topics.go`, `internal/hass/client.go`
-- Test: `internal/hass/client_test.go`
+- Modify: `internal/mqtt/topics.go`, `internal/mqtt/client.go`
+- Test: `internal/mqtt/client_test.go`
 
 **Interfaces:**
 - Consumes: the existing `Client` lock map (topic id → `LockInfo`), `waitSubscribe` and `onConnect`.
-- Produces the following, all in `internal/hass`:
+- Produces the following, all in `internal/mqtt`:
   - `ClientConfig.CloudWebhooks bool`
   - `type CloudWebhook struct { LockID string; Body []byte }`, where `LockID` is the real lock id, not the topic id
   - `func (c *Client) CloudWebhooks() <-chan CloudWebhook`, a buffered channel the same size as the command channel
@@ -186,19 +253,19 @@ Client
 ```
 
 - [ ] **Step 1:** Write the topic tests, then the broker-backed client tests with `internal/testutil`: one per scenario above, including `TestCloudWebhookRetainedIgnored` (initial connect and reconnect) and `TestCloudWebhookNotSubscribedWhenDisabled`. Capture logs with a `slog` text handler on a buffer, and assert that a marker string from the payload never appears.
-- [ ] **Step 2:** Run `go test ./internal/hass -run 'CloudWebhook'`. Expected: FAIL.
+- [ ] **Step 2:** Run `go test ./internal/mqtt -run 'CloudWebhook'`. Expected: FAIL.
 - [ ] **Step 3:** Implement the topics, config field, channel, subscription and filter. The filter mirrors `onCommand` (retained check first, then lock lookup) and adds the size check.
-- [ ] **Step 4:** Run `go test -race ./internal/hass`, then `-count=8`, because broker tests had a one-off hang before. Expected: PASS. The discovery golden file is unchanged.
-- [ ] **Step 5:** Commit with the message `hass: accept cloud webhook bodies on <id>/cloud_webhook`.
+- [ ] **Step 4:** Run `go test -race ./internal/mqtt/...`, then `-count=8`, because broker tests had a one-off hang before. Expected: PASS. The discovery golden file is unchanged.
+- [ ] **Step 5:** Commit with the message `mqtt: accept cloud webhook bodies on <id>/cloud_webhook`.
 
-### Task 3: Config, wiring, end to end
+### Task 4: Config, wiring, end to end
 
 **Files:**
 - Modify: `internal/config/config.go`, `internal/app/app.go`, `addon/config.yaml`, `addon/translations/en.yaml`
 - Test: `internal/config/config_test.go`, `internal/app/app_test.go`
 
 **Interfaces:**
-- Consumes: `hass.Client.CloudWebhooks()`, `Manager.DeliverCloudWebhook`, `hass.Topics.CloudWebhook`.
+- Consumes: `mqtt.Client.CloudWebhooks()`, `Manager.DeliverCloudWebhook`, `mqtt.Topics.CloudWebhook`.
 - Produces:
   - `config.MQTT.CloudWebhooks bool`;
   - `forwardCloudWebhooks(ctx, mq, manager, log)` in `internal/app`, the sibling of `forwardCommands`.
@@ -256,7 +323,7 @@ App
 - [ ] **Step 5:** Run the full suite: `gofmt -l .`, `go vet ./...`, `go test -race ./...` and golangci-lint. Expected: all clean.
 - [ ] **Step 6:** Commit with the message `app: wire cloud webhooks over MQTT`.
 
-### Task 4: Documentation — Home Assistant / Nabu Casa recipe
+### Task 5: Documentation — Home Assistant / Nabu Casa recipe
 
 BDD skeleton skipped: documentation only.
 
@@ -283,11 +350,11 @@ BDD skeleton skipped: documentation only.
 - [ ] **Step 2:** Run `go test ./...` (the docs don't affect it; this confirms nothing else changed) and `gofmt -l .`.
 - [ ] **Step 3:** Commit with the message `docs: cloud webhooks via Home Assistant and MQTT`.
 
-### Task 5: V10 — Home Assistant relay against the real lock (manual, user-assisted)
+### Task 6: V10 — Home Assistant relay against the real lock (manual, user-assisted)
 
 BDD skeleton skipped: a manual verification on real hardware. The steps and the expected outcomes are its contract.
 
-- [ ] **Step 1:** With the user, create the automation from Task 4 in their Home Assistant. Check in Developer Tools → Template that the payload template turns a synthetic sample body (fake values) back into identical JSON, numbers kept as numbers.
+- [ ] **Step 1:** With the user, create the automation from Task 5 in their Home Assistant. Check in Developer Tools → Template that the payload template turns a synthetic sample body (fake values) back into identical JSON, numbers kept as numbers.
 - [ ] **Step 2:**
   - Run the gateway (scratch build) with `mqtt.cloud_webhooks: true` against the user's broker.
   - Subscribe to `loqed/+/cloud_webhook` and record only the key names and value types of each payload, never the values.
@@ -302,14 +369,15 @@ BDD skeleton skipped: a manual verification on real hardware. The steps and the 
 
 | Spec item | Task |
 |---|---|
-| 6.1 `cloud_webhook` topic, retained/unknown/size rules | 2 |
-| 6.1 decode and route like HTTP, warn on mismatch/invalid/busy, payload never logged | 1, 3 |
-| 7 shared decode-and-route, HTTP status codes unchanged | 1 |
-| 5.1 `mqtt.cloud_webhooks`; add-on schema | 3 |
-| 5.5 "cloud webhooks configured" from either source | 3 |
-| 5.4 step 6 topic log | 3 |
-| 5.7 dedup across MQTT, bridge and redelivery | 3 (existing dedup, tested end to end) |
-| 9 DOCS recipe, trust note | 4 |
+| 6.1 `cloud_webhook` topic, retained/unknown/size rules | 3 |
+| 6.1 decode and route like HTTP, warn on mismatch/invalid/busy, payload never logged | 2, 4 |
+| 7 shared decode-and-route, HTTP status codes unchanged | 2 |
+| 5.1 `mqtt.cloud_webhooks`; add-on schema | 4 |
+| 5.5 "cloud webhooks configured" from either source | 4 |
+| 5.4 step 6 topic log | 4 |
+| 5.7 dedup across MQTT, bridge and redelivery | 4 (existing dedup, tested end to end) |
+| 9 DOCS recipe, trust note | 5 |
+| 3 package layout (`internal/mqtt`, `internal/mqtt/hass-discovery`) | 1 |
 | 10 fixtures in real shapes | done in `31d7e70` |
-| 10 hass retained/disabled tests | 2 |
-| V10 | 5 |
+| 10 mqtt retained/disabled tests | 3 |
+| V10 | 6 |
