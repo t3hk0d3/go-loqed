@@ -44,6 +44,8 @@ func (s *Supervisor) tryEnterLocal(ctx context.Context) bool {
 	}
 	now := s.d.Now()
 	s.setMode(model.ModeLocal)
+	s.markUnconfirmed(now)
+	s.bridgeCheckAt = time.Time{}
 	s.applyStatus(ctx, now, st)
 	s.nextProbe = now.Add(s.t.Liveness)
 	s.nextReconcile = now.Add(s.t.Reconcile)
@@ -67,7 +69,7 @@ func (s *Supervisor) status(ctx context.Context) (*bridge.Status, error) {
 // retry; an auth failure refreshes credentials first. It returns false if
 // the lock had to leave local mode (no usable bridge client).
 func (s *Supervisor) registerWebhook(ctx context.Context) bool {
-	err := s.ensureWebhook(ctx)
+	created, err := s.ensureWebhook(ctx)
 	if errors.Is(err, loqed.ErrUnauthorized) {
 		if !s.refreshAndRebuild(ctx, ReasonUnauthorized) {
 			if s.bridge == nil {
@@ -75,32 +77,59 @@ func (s *Supervisor) registerWebhook(ctx context.Context) bool {
 				return false
 			}
 		} else {
-			err = s.ensureWebhook(ctx)
+			created, err = s.ensureWebhook(ctx)
 		}
 	}
 	s.webhookOK = err == nil
+	if created {
+		s.markUnconfirmed(s.d.Now()) // a new registration must prove itself
+	}
 	if err != nil {
 		s.nextWebhookRetry = s.d.Now().Add(s.t.WebhookRetry)
-		s.warn("could not register the webhook on the bridge; polling /status every 10 min until it works", "err", err)
+		s.warn("could not register the webhook on the bridge; reading /status every minute until it works", "err", err)
 	}
 	return true
 }
 
+// markUnconfirmed: until a signed bridge webhook arrives, /status is read
+// every Liveness.
+func (s *Supervisor) markUnconfirmed(now time.Time) {
+	if s.webhookConfirmed || s.nextUnconfirmedRead.IsZero() {
+		s.nextUnconfirmedRead = now.Add(s.t.Liveness)
+	}
+	s.webhookConfirmed = false
+}
+
+// unconfirmWebhooks reports that bridge webhooks seem not to arrive and
+// falls back to reading /status every Liveness.
+func (s *Supervisor) unconfirmWebhooks(now time.Time, why string) {
+	s.markUnconfirmed(now)
+	addr := ""
+	if u, err := s.d.WebhookURL(s.Record()); err == nil {
+		if pu, err := url.Parse(u); err == nil {
+			addr = pu.Host
+		}
+	}
+	s.warn("bridge webhooks are not reaching the gateway; allow the bridge to connect to this address (reading /status every minute meanwhile)",
+		"address", addr, "reason", why)
+}
+
 // ensureWebhook registers <private>/webhook/<id> and removes our stale
 // registrations (same path, different host or port). Other webhooks stay.
-func (s *Supervisor) ensureWebhook(ctx context.Context) error {
+// It reports whether it created our webhook.
+func (s *Supervisor) ensureWebhook(ctx context.Context) (bool, error) {
 	if s.bridge == nil {
-		return errNoBridge
+		return false, errNoBridge
 	}
 	want, err := s.d.WebhookURL(s.Record())
 	if err != nil {
-		return err
+		return false, err
 	}
 	c, cancel := s.reqCtx(ctx)
 	defer cancel()
 	hooks, err := s.bridge.ListWebhooks(c)
 	if err != nil {
-		return err
+		return false, err
 	}
 	suffix := "/webhook/" + s.id
 	found := false
@@ -126,9 +155,12 @@ func (s *Supervisor) ensureWebhook(ctx context.Context) error {
 			"other_webhooks", others)
 	}
 	if found {
-		return nil
+		return false, nil
 	}
-	return s.bridge.CreateWebhook(c, want, bridge.AllTriggers)
+	if err := s.bridge.CreateWebhook(c, want, bridge.AllTriggers); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
@@ -155,15 +187,29 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 			}
 			return s.mode == model.ModeLocal
 		},
-		func() bool { // webhook registration pending
+		func() bool { // webhook registration pending (the reads below cover state)
 			if s.webhookOK || now.Before(s.nextWebhookRetry) {
 				return true
 			}
 			s.nextWebhookRetry = now.Add(s.t.WebhookRetry)
-			if !s.registerWebhook(ctx) {
-				return false
+			return s.registerWebhook(ctx)
+		},
+		func() bool { // a bridge-sent command saw no bridge webhook
+			if s.bridgeCheckAt.IsZero() || now.Before(s.bridgeCheckAt) {
+				return true
 			}
-			s.reconcile(ctx) // no webhooks yet: poll instead
+			s.bridgeCheckAt = time.Time{}
+			if s.lastBridgeEventAt.Before(s.bridgeCheckSince) {
+				s.unconfirmWebhooks(now, "a command sent via the bridge was not followed by any bridge webhook")
+			}
+			return true
+		},
+		func() bool { // webhook delivery unconfirmed: read /status instead
+			if s.webhookConfirmed || now.Before(s.nextUnconfirmedRead) {
+				return true
+			}
+			s.nextUnconfirmedRead = now.Add(s.t.Liveness)
+			s.readStatus(ctx)
 			return s.mode == model.ModeLocal
 		},
 		func() bool { // TCP liveness
@@ -200,10 +246,18 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 	}
 }
 
-// reconcile fetches /status; it reports whether that worked.
+// reconcile fetches /status and restarts the reconcile interval; it reports
+// whether that worked.
 func (s *Supervisor) reconcile(ctx context.Context) bool {
+	s.nextReconcile = s.d.Now().Add(s.t.Reconcile)
+	return s.readStatus(ctx)
+}
+
+// readStatus fetches and applies /status; it reports whether that worked.
+// It leaves the reconcile schedule alone, so the periodic webhook check
+// still runs while delivery is unconfirmed.
+func (s *Supervisor) readStatus(ctx context.Context) bool {
 	now := s.d.Now()
-	s.nextReconcile = now.Add(s.t.Reconcile)
 	if s.state.BoltState == loqed.BoltUnknown {
 		s.lastUnknownCheck = now
 	}
@@ -214,9 +268,21 @@ func (s *Supervisor) reconcile(ctx context.Context) bool {
 		return false
 	}
 	s.httpFailures = 0
+	if s.missedBridgeChange(now, st.BoltState) {
+		s.unconfirmWebhooks(now, "the bridge status changed without a bridge webhook")
+	}
 	s.applyStatus(ctx, now, st)
 	s.publish()
 	return true
+}
+
+// missedBridgeChange: /status shows another bolt state although no bridge
+// webhook arrived for a reconcile interval, so changes are not delivered.
+func (s *Supervisor) missedBridgeChange(now time.Time, bolt loqed.BoltState) bool {
+	if bolt == loqed.BoltUnknown || s.state.BoltState == loqed.BoltUnknown || bolt == s.state.BoltState {
+		return false
+	}
+	return s.lastBridgeEventAt.IsZero() || now.Sub(s.lastBridgeEventAt) > s.t.Reconcile
 }
 
 // probeLocal is the TCP liveness check. Success only resets the probe
@@ -299,6 +365,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 		s.tryEnterLocal(ctx)
 	}
 	now := s.d.Now()
+	s.webhookConfirmed, s.lastBridgeEventAt = true, now // duplicates count too
 	if s.mode == model.ModeLocal {
 		s.probeFailures, s.httpFailures = 0, 0
 		s.nextProbe = now.Add(s.t.Liveness) // a webhook proves the bridge is alive

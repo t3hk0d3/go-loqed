@@ -100,6 +100,7 @@ func TestOnlineAndBatteryEventsTrackLockOnline(t *testing.T) {
 func TestStatusOnlyOnReconcileSchedule(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
+	h.confirmDelivery() // otherwise /status is read every minute
 	if h.bridge.statusCalls != 1 {
 		t.Fatalf("status calls %d", h.bridge.statusCalls)
 	}
@@ -130,6 +131,7 @@ func TestUnknownBoltRecheckedEveryTenMinutes(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.bridge.status.BoltState = loqed.BoltUnknown
 	h.start()
+	h.confirmDelivery() // otherwise /status is read every minute
 	if h.state().Lock != nil {
 		t.Fatal("unknown bolt must publish lock=null")
 	}
@@ -204,19 +206,20 @@ func TestWebhookRegistrationRetriedEveryTenMinutes(t *testing.T) {
 	if h.s.mode != model.ModeLocal || h.s.webhookOK || h.bridge.listCalls != 1 {
 		t.Fatalf("mode %s ok %v lists %d", h.s.mode, h.s.webhookOK, h.bridge.listCalls)
 	}
-	h.advance(10 * time.Minute)
-	if h.bridge.listCalls != 2 || h.bridge.statusCalls != 2 {
-		t.Fatalf("retry + poll expected: lists %d status %d", h.bridge.listCalls, h.bridge.statusCalls)
+	h.run(10 * time.Minute)
+	if h.bridge.listCalls != 2 || h.bridge.statusCalls != 11 {
+		t.Fatalf("retry + a read per minute expected: lists %d status %d", h.bridge.listCalls, h.bridge.statusCalls)
 	}
 	h.bridge.listErr = nil
-	h.advance(10 * time.Minute)
+	h.run(10 * time.Minute)
 	if !h.s.webhookOK || len(h.bridge.created) != 1 {
 		t.Fatalf("ok %v created %v", h.s.webhookOK, h.bridge.created)
 	}
+	h.confirmDelivery()
 	status := h.bridge.statusCalls
-	h.advance(10 * time.Minute)
+	h.run(10 * time.Minute)
 	if h.bridge.statusCalls != status {
-		t.Fatal("polling must stop once the webhook is registered")
+		t.Fatal("reads must stop once the webhook is registered and a bridge webhook arrived")
 	}
 }
 

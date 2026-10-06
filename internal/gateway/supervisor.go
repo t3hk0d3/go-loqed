@@ -183,6 +183,14 @@ type Supervisor struct {
 	webhookOK        bool
 	nextWebhookRetry time.Time
 
+	// Bridge webhook delivery: registration only proves the gateway reaches
+	// the bridge, not the reverse (a firewall may block bridge → gateway).
+	webhookConfirmed    bool      // a signed bridge webhook arrived since the last (re-)registration
+	lastBridgeEventAt   time.Time // last signed bridge webhook, duplicates included
+	nextUnconfirmedRead time.Time // /status while delivery is unconfirmed
+	bridgeCheckAt       time.Time // a bridge-sent command's confirmation window ends
+	bridgeCheckSince    time.Time // ... and needs a bridge webhook since this
+
 	// Command / movement confirmation.
 	confirmTarget     loqed.BoltState // BoltUnknown: any reached state confirms
 	confirmAt         time.Time       // local: /status at this time

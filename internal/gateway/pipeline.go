@@ -315,6 +315,7 @@ func (p *commandPipeline) sent(now time.Time, a *command, via model.Via) {
 	s.lastEventAt = now
 	if via == model.ViaLocal {
 		s.awaitConfirm(now, a.target())
+		s.bridgeCheckSince, s.bridgeCheckAt = now, now.Add(s.t.WebhookConfirm)
 	} else {
 		s.scheduleCloudConfirm(now, a.target())
 	}

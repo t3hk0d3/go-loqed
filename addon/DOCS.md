@@ -19,8 +19,10 @@ to the LOQED cloud when the bridge is unreachable.
      sensors.
 4. If your bridge sits in a separate network (an IoT VLAN, for example),
    allow connections **from the bridge to this host on port 8099**. The
-   bridge pushes its webhooks to the gateway. Without that rule, state
-   changes arrive only from occasional polls.
+   bridge pushes its webhooks to the gateway. Without that rule the add-on
+   log warns that bridge webhooks are not arriving (naming the address and
+   port to allow), and the gateway reads the bridge's status every minute
+   instead, so changes show up late and without lock events.
 
 ## Lock settings
 
