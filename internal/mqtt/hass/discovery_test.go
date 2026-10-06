@@ -8,38 +8,32 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/t3hk0d3/go-loqed/internal/hass"
 	"github.com/t3hk0d3/go-loqed/internal/model"
+	"github.com/t3hk0d3/go-loqed/internal/mqtt"
+	"github.com/t3hk0d3/go-loqed/internal/mqtt/hass"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
 
-var topics = hass.Topics{Base: "loqed", DiscoveryPrefix: "homeassistant"}
+var discovery = hass.New("homeassistant", mqtt.Topics{Base: "loqed"}, "1.2.3")
 
-func TestTopics(t *testing.T) {
-	cases := map[string]string{
-		topics.Status():             "loqed/status",
-		topics.Availability("abc"):  "loqed/abc/availability",
-		topics.State("abc"):         "loqed/abc/state",
-		topics.Event("abc"):         "loqed/abc/event",
-		topics.Command("abc"):       "loqed/abc/command",
-		topics.CommandStatus("abc"): "loqed/abc/command_status",
-		topics.CommandWildcard():    "loqed/+/command",
-		topics.Discovery("abc"):     "homeassistant/device/loqed_abc/config",
-		topics.HAStatus():           "homeassistant/status",
+// The interface is the only way the MQTT client learns about Home Assistant.
+var _ mqtt.Discovery = discovery
+
+func TestDiscoveryTopic(t *testing.T) {
+	if got := discovery.Topic("Yq1g/K4"); got != "homeassistant/device/loqed_Yq1g_K4/config" {
+		t.Errorf("got %s", got)
 	}
-	for got, want := range cases {
-		if got != want {
-			t.Errorf("got %s want %s", got, want)
-		}
-	}
-	if hass.TopicID("Yq1g/K4+#x y") != "Yq1g_K4__x_y" {
-		t.Errorf("TopicID: %s", hass.TopicID("Yq1g/K4+#x y"))
+}
+
+func TestBirthTopic(t *testing.T) {
+	if got := discovery.BirthTopic(); got != "homeassistant/status" {
+		t.Errorf("got %s", got)
 	}
 }
 
 func TestDiscoveryPayload(t *testing.T) {
-	b, err := hass.DiscoveryPayload(topics, hass.LockInfo{ID: "lock1", Name: "Front door", Model: "LOQED Touch", MacWifi: "AA:BB:CC:DD:EE:FF"}, "1.2.3")
+	b, err := discovery.Payload(mqtt.LockInfo{ID: "lock1", Name: "Front door", Model: "LOQED Touch", MacWifi: "AA:BB:CC:DD:EE:FF"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +115,7 @@ func TestDiscoveryPayload(t *testing.T) {
 	}
 	want, err := os.ReadFile(golden)
 	if err != nil {
-		t.Fatalf("missing golden file; run go test ./internal/hass -run TestDiscoveryPayload -update: %v", err)
+		t.Fatalf("missing golden file; run go test ./internal/mqtt/hass -run TestDiscoveryPayload -update: %v", err)
 	}
 	if !bytes.Equal(want, pretty.Bytes()) {
 		t.Fatalf("discovery payload changed; review and run with -update.\n got: %s", pretty.Bytes())

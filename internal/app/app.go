@@ -21,7 +21,8 @@ import (
 	"github.com/t3hk0d3/go-loqed/internal/auth"
 	"github.com/t3hk0d3/go-loqed/internal/config"
 	"github.com/t3hk0d3/go-loqed/internal/gateway"
-	"github.com/t3hk0d3/go-loqed/internal/hass"
+	"github.com/t3hk0d3/go-loqed/internal/mqtt"
+	"github.com/t3hk0d3/go-loqed/internal/mqtt/hass"
 	"github.com/t3hk0d3/go-loqed/internal/store"
 	"github.com/t3hk0d3/go-loqed/internal/webhook"
 )
@@ -127,10 +128,14 @@ func Run(ctx context.Context, o Options) error {
 	published := newPublished(selected)
 	removed := removedIDs(before, selected)
 	published.addPending(removed)
-	mq := hass.NewClient(hass.ClientConfig{
+	topics := mqtt.Topics{Base: cfg.MQTT.BaseTopic}
+	var discovery mqtt.Discovery
+	if cfg.HomeAssistant.Enabled {
+		discovery = hass.New(cfg.HomeAssistant.DiscoveryPrefix, topics, o.Version)
+	}
+	mq := mqtt.NewClient(mqtt.ClientConfig{
 		URL: cfg.MQTT.URL, Username: cfg.MQTT.Username, Password: cfg.MQTT.Password, ClientID: cfg.MQTT.ClientID,
-		Topics:    hass.Topics{Base: cfg.MQTT.BaseTopic, DiscoveryPrefix: cfg.HomeAssistant.DiscoveryPrefix},
-		HAEnabled: cfg.HomeAssistant.Enabled, Version: o.Version, Now: now,
+		Topics: topics, Discovery: discovery, Now: now,
 		OnRemovedCleared: func(ids []string) {
 			published.clearPending(ids)
 			savePublished(st, published.persistIDs(), log)
@@ -248,7 +253,7 @@ func Run(ctx context.Context, o Options) error {
 	return nil
 }
 
-func forwardCommands(ctx context.Context, mq *hass.Client, m *gateway.Manager, log *slog.Logger) {
+func forwardCommands(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, log *slog.Logger) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -380,19 +385,19 @@ func removedIDs(before store.Cache, selected []store.LockRecord) []string {
 // cleared; they stay in published_ids so a restart still clears them.
 type published struct {
 	mu      sync.Mutex
-	locks   []hass.LockInfo
+	locks   []mqtt.LockInfo
 	pending []string
 }
 
 func newPublished(recs []store.LockRecord) *published {
 	p := &published{}
 	for _, r := range recs {
-		p.locks = append(p.locks, hass.LockInfo{ID: r.ID, Name: r.Name, Model: r.ModelName, MacWifi: r.BridgeMacWifi})
+		p.locks = append(p.locks, mqtt.LockInfo{ID: r.ID, Name: r.Name, Model: r.ModelName, MacWifi: r.BridgeMacWifi})
 	}
 	return p
 }
 
-func (p *published) infos() []hass.LockInfo {
+func (p *published) infos() []mqtt.LockInfo {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return slices.Clone(p.locks)
@@ -425,11 +430,11 @@ func (p *published) clearPending(ids []string) {
 	p.pending = slices.DeleteFunc(p.pending, func(id string) bool { return slices.Contains(ids, id) })
 }
 
-func (p *published) remove(ids []string) []hass.LockInfo {
+func (p *published) remove(ids []string) []mqtt.LockInfo {
 	p.addPending(ids)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.locks = slices.DeleteFunc(p.locks, func(l hass.LockInfo) bool { return slices.Contains(ids, l.ID) })
+	p.locks = slices.DeleteFunc(p.locks, func(l mqtt.LockInfo) bool { return slices.Contains(ids, l.ID) })
 	return slices.Clone(p.locks)
 }
 

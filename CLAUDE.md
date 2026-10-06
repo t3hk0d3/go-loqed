@@ -17,7 +17,7 @@ go test ./internal/gateway -run TestName    # single test
 gofmt -l .                                  # must print nothing
 go vet ./...
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...   # pinned; config in .golangci.yml
-go test ./internal/hass -run TestDiscoveryPayload -update   # rewrite HA discovery golden file (review the diff)
+go test ./internal/mqtt/hass -run TestDiscoveryPayload -update   # rewrite HA discovery golden file (review the diff)
 python3 testdata/gen_vectors.py             # regenerate bridge signing golden vectors
 docker build --target standalone .          # or --target addon
 ```
@@ -38,14 +38,15 @@ internal/auth/               cloud auth: token or email/password → minted toke
 internal/store/              credential cache /data/locks.json (atomic write, 0600)
 internal/gateway/            per-lock supervisors, local/cloud/offline modes, failover, cloud budget
 internal/webhook/            HTTP listener for bridge/cloud webhooks, /healthz
-internal/hass/               MQTT client, topics, HA discovery, state/event publishing
+internal/mqtt/               MQTT client, <base>/... topics, state/event/command_status publishing, command input
+internal/mqtt/hass/          Home Assistant discovery (documents, discovery topic, HA birth topic)
 internal/model/              normalized lock state/event model and mapping
 internal/testutil/           in-process MQTT broker (mochi) for tests
 addon/                       HA add-on config.yaml, DOCS.md, translations
 ```
 
 - Library packages (`loqed`, `bridge`, `cloud`, `cloud/portal`, `internal/transport`) import **only the standard library**, and have **no goroutines, timers or package-level mutable state**. Every network method takes `context.Context` first.
-- `internal/gateway` is the only package that knows local vs cloud. `internal/hass` is the only package that imports the MQTT library or knows topic names. They talk through a small interface plus a command channel.
+- `internal/gateway` is the only package that knows local vs cloud. `internal/mqtt` is the only package that imports the MQTT library (besides the test helper `internal/testutil`) and knows nothing about Home Assistant; `internal/mqtt/hass` holds everything HA specific and reaches the client only through the `mqtt.Discovery` interface (never the reverse; `internal/mqtt/boundary_test.go` enforces both). Gateway and MQTT talk through a small interface plus a command channel.
 - Bridges are addressed by IP only — never hostnames/mDNS.
 
 ## Conventions

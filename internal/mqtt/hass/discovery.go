@@ -1,3 +1,4 @@
+// Package hass is Home Assistant MQTT discovery for the gateway's topics.
 package hass
 
 import (
@@ -5,19 +6,35 @@ import (
 	"strings"
 
 	"github.com/t3hk0d3/go-loqed/internal/model"
+	"github.com/t3hk0d3/go-loqed/internal/mqtt"
 )
 
-type LockInfo struct {
-	ID      string
-	Name    string
-	Model   string
-	MacWifi string
+// Discovery implements mqtt.Discovery for Home Assistant.
+type Discovery struct {
+	prefix  string
+	topics  mqtt.Topics
+	version string
 }
 
-// DiscoveryPayload builds the device-based discovery message: one device
-// per lock with all of its entities as components.
-func DiscoveryPayload(t Topics, l LockInfo, version string) ([]byte, error) {
-	tid := TopicID(l.ID)
+// New returns discovery under prefix (usually "homeassistant") for entities
+// backed by topics; version is reported as the origin's sw_version.
+func New(prefix string, topics mqtt.Topics, version string) *Discovery {
+	return &Discovery{prefix: prefix, topics: topics, version: version}
+}
+
+// BirthTopic is where Home Assistant announces "online" after a restart.
+func (d *Discovery) BirthTopic() string { return d.prefix + "/status" }
+
+// Topic is the lock's retained device discovery topic.
+func (d *Discovery) Topic(lockID string) string {
+	return d.prefix + "/device/loqed_" + mqtt.TopicID(lockID) + "/config"
+}
+
+// Payload builds the device-based discovery message: one device per lock
+// with all of its entities as components.
+func (d *Discovery) Payload(l mqtt.LockInfo) ([]byte, error) {
+	t, version := d.topics, d.version
+	tid := mqtt.TopicID(l.ID)
 	uid := "loqed_" + tid
 	state := t.State(tid)
 	modelName := l.Model

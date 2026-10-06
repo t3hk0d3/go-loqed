@@ -1,4 +1,4 @@
-package hass
+package mqtt
 
 import (
 	"encoding/json"
@@ -12,23 +12,40 @@ import (
 	"sync"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/t3hk0d3/go-loqed/internal/model"
 )
 
 type ClientConfig struct {
-	URL       string
-	Username  string
-	Password  string
-	ClientID  string
-	Topics    Topics
-	HAEnabled bool
-	Version   string
+	URL      string
+	Username string
+	Password string
+	ClientID string
+	Topics   Topics
+	// Discovery publishes Home Assistant discovery; nil disables it.
+	Discovery Discovery
 	Now       func() time.Time // clock for command timestamps; nil = time.Now
 	// OnRemovedCleared is called with the ids of removed locks whose retained
 	// topics have been cleared on the broker.
 	OnRemovedCleared func(ids []string)
+}
+
+// Discovery describes a discovery protocol (Home Assistant) without the
+// client knowing about it: where each lock's retained discovery document goes,
+// what it contains, and which topic announces that the consumer restarted.
+type Discovery interface {
+	BirthTopic() string
+	Topic(lockID string) string
+	Payload(l LockInfo) ([]byte, error)
+}
+
+// LockInfo is what discovery needs to know about a lock.
+type LockInfo struct {
+	ID      string
+	Name    string
+	Model   string
+	MacWifi string
 }
 
 // Command is a lock command received over MQTT.
@@ -42,7 +59,7 @@ type Command struct {
 type Client struct {
 	cfg      ClientConfig
 	log      *slog.Logger
-	mc       mqtt.Client
+	mc       paho.Client
 	commands chan Command
 	now      func() time.Time
 
@@ -69,7 +86,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		c.now = time.Now
 	}
 	c.downSince = c.now()
-	opts := mqtt.NewClientOptions().
+	opts := paho.NewClientOptions().
 		AddBroker(cfg.URL).
 		SetClientID(cfg.ClientID).
 		SetUsername(cfg.Username).
@@ -82,19 +99,19 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		SetKeepAlive(30*time.Second).
 		SetOrderMatters(false).
 		SetWill(cfg.Topics.Status(), "offline", 1, true).
-		SetOnConnectHandler(func(mqtt.Client) {
+		SetOnConnectHandler(func(paho.Client) {
 			c.mu.Lock()
 			c.downSince = time.Time{}
 			c.mu.Unlock()
 			go c.onConnect()
 		}).
-		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+		SetConnectionLostHandler(func(_ paho.Client, err error) {
 			c.mu.Lock()
 			c.downSince = c.now()
 			c.mu.Unlock()
 			log.Warn("MQTT connection lost", "err", err)
 		})
-	c.mc = mqtt.NewClient(opts)
+	c.mc = paho.NewClient(opts)
 	return c
 }
 
@@ -211,7 +228,7 @@ func (c *Client) publish(topic string, retain bool, payload []byte) error {
 	}
 	tok := c.mc.Publish(topic, 1, retain, payload)
 	if !tok.WaitTimeout(publishTimeout) {
-		return fmt.Errorf("hass: publishing to %s timed out", topic)
+		return fmt.Errorf("mqtt: publishing to %s timed out", topic)
 	}
 	return tok.Error()
 }
@@ -223,10 +240,10 @@ func (c *Client) onConnect() {
 		c.log.Warn("publishing gateway status failed", "err", err)
 	}
 	c.waitSubscribe(t.CommandWildcard(), c.mc.Subscribe(t.CommandWildcard(), 1, c.onCommand))
-	if c.cfg.HAEnabled {
-		c.waitSubscribe(t.HAStatus(), c.mc.Subscribe(t.HAStatus(), 1, func(_ mqtt.Client, m mqtt.Message) {
+	if d := c.cfg.Discovery; d != nil {
+		c.waitSubscribe(d.BirthTopic(), c.mc.Subscribe(d.BirthTopic(), 1, func(_ paho.Client, m paho.Message) {
 			if string(m.Payload()) == "online" {
-				c.log.Info("Home Assistant came online; republishing discovery")
+				c.log.Info("discovery consumer came online; republishing discovery")
 				go c.publishDiscovery()
 			}
 		}))
@@ -249,7 +266,7 @@ func (c *Client) onConnect() {
 }
 
 // waitSubscribe logs a warning if a subscription fails or times out.
-func (c *Client) waitSubscribe(topic string, tok mqtt.Token) {
+func (c *Client) waitSubscribe(topic string, tok paho.Token) {
 	if !tok.WaitTimeout(publishTimeout) {
 		c.log.Warn("MQTT subscription timed out", "topic", topic)
 	} else if err := tok.Error(); err != nil {
@@ -283,8 +300,8 @@ func (c *Client) publishDiscovery() {
 			c.publish(t.State(TopicID(id)), true, []byte{}),
 			c.publish(t.CommandStatus(TopicID(id)), true, []byte{}),
 			c.publish(t.Availability(TopicID(id)), true, []byte{}))
-		if c.cfg.HAEnabled {
-			err = errors.Join(err, c.publish(t.Discovery(TopicID(id)), true, []byte{}))
+		if d := c.cfg.Discovery; d != nil {
+			err = errors.Join(err, c.publish(d.Topic(id), true, []byte{}))
 		}
 		if err == nil && c.mc.IsConnectionOpen() {
 			cleared = append(cleared, id)
@@ -298,22 +315,23 @@ func (c *Client) publishDiscovery() {
 			c.cfg.OnRemovedCleared(cleared)
 		}
 	}
-	if !c.cfg.HAEnabled {
+	d := c.cfg.Discovery
+	if d == nil {
 		return
 	}
 	for _, l := range locks {
-		payload, err := DiscoveryPayload(t, l, c.cfg.Version)
+		payload, err := d.Payload(l)
 		if err != nil {
 			c.log.Error("building discovery payload failed", "lock_id", l.ID, "err", err)
 			continue
 		}
-		if err := c.publish(t.Discovery(TopicID(l.ID)), true, payload); err != nil {
+		if err := c.publish(d.Topic(l.ID), true, payload); err != nil {
 			c.log.Warn("publishing discovery failed", "lock_id", l.ID, "err", err)
 		}
 	}
 }
 
-func (c *Client) onCommand(_ mqtt.Client, m mqtt.Message) {
+func (c *Client) onCommand(_ paho.Client, m paho.Message) {
 	if m.Retained() {
 		// A retained OPEN would unlatch the door on every reconnect.
 		c.log.Warn("retained command ignored; publish commands without the retain flag", "topic", m.Topic())
