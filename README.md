@@ -5,6 +5,58 @@
 - **loqed-mqtt** (`cmd/loqed-mqtt`): a local-first MQTT gateway for LOQED
   locks with Home Assistant discovery and automatic cloud fallback.
 
+## loqed-mqtt vs. the built-in Home Assistant integration
+
+Home Assistant's core `loqed` integration talks only to the bridge. It stores
+the bridge's IP and keys once, at setup, reads the bridge's status at
+startup, and relies on bridge webhooks after that. loqed-mqtt adds:
+
+- **Cloud fallback.** When the bridge is unreachable, the gateway switches to
+  LOQED's cloud API for state and commands, and back to local when the bridge
+  returns. It stays under LOQED's limit of 12 status reads per 12 hours (which
+  otherwise blocks the account), across restarts too. Cloud webhooks keep the
+  state fresh in cloud mode, through a reverse proxy or through Home Assistant
+  Cloud and MQTT.
+- **Command results you can trust.**
+  - The bridge answers "OK" even to commands the lock rejects. The gateway
+    counts a command as done only when the lock reports moving and then
+    reaching the target.
+  - Each command's progress and outcome is published (`command_status`, the
+    **Last command** sensor), and a failed command raises a `command_failed`
+    event.
+  - A command is retried (locally, then once via the cloud) only when it
+    provably never reached the bridge, so a slow bridge never gets a second
+    `OPEN`.
+- **Honest state.** A `state_stale` flag and a **State stale** sensor show
+  when the state may be out of date, instead of showing an old state as
+  current.
+- **More entities.**
+  - The core integration has the lock, battery and Bluetooth signal.
+  - loqed-mqtt adds Wi-Fi signal, battery voltage, lock online, connection
+    mode (local, cloud or offline), last change reason with the key's name,
+    last command and token expiry.
+  - It also adds an event entity for every lock event, with names for key ids
+    (`lock_settings.key_names`).
+- **Keeps working when things change.** A new bridge IP (DHCP) or new keys are
+  picked up from the cloud automatically, with no need to set the integration
+  up again. With email and password configured, the gateway creates and renews
+  its own access token; tokens expire after about six months.
+- **Bridge webhooks stay on the LAN.** With Home Assistant Cloud active, the
+  core integration registers its Nabu Casa URL on the bridge, so every bridge
+  event makes a round trip through the internet. The gateway always registers
+  its local address.
+- **All locks in one place.** One instance serves every lock on the account
+  (or an allow-list) and deduplicates the bridge and cloud copies of each
+  event.
+- **Not tied to Home Assistant.** Any MQTT client (Node-RED, openHAB, scripts)
+  can read the retained state and send commands. The gateway keeps running,
+  and keeps the state current, while Home Assistant restarts.
+
+What the core integration has that loqed-mqtt doesn't: it needs no MQTT
+broker, and it finds bridges via zeroconf. Run one or the other for a lock,
+not both: each adds its own webhook to the bridge, and the bridge delivers
+webhooks one after another, so every extra target delays events.
+
 ## Running loqed-mqtt
 
 Home Assistant OS: add this repository in *Settings → Add-ons → Add-on
