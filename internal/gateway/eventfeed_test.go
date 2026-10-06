@@ -105,40 +105,17 @@ func TestDifferentEventsAreNotDuplicates(t *testing.T) {
 	}
 }
 
-func TestAutomaticLatchAfterOpenPublishesNoEvent(t *testing.T) {
+// The lock's own return to day_lock after an open is a real state change:
+// it is published like any other event (source unknown: no key).
+func TestAutomaticLatchAfterOpenIsAnEvent(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.send(reached("STATE_CHANGED_OPEN", model.Ptr(3)))
-	events := len(h.pub.events)
 	h.advance(3 * time.Second)
 	h.send(reached("STATE_CHANGED_LATCH", nil))
-	if len(h.pub.events) != events {
-		t.Fatalf("the automatic latch must not be an event: %+v", h.pub.events[events:])
-	}
-	if s := h.state(); s.BoltState != loqed.BoltDayLock || h.lock() != "UNLOCKED" {
-		t.Fatalf("state %+v", s)
-	}
-}
-
-func TestLatchWithKeyOrLaterIsAnEvent(t *testing.T) {
-	cases := map[string]struct {
-		after time.Duration
-		key   *int
-	}{
-		"with a key": {time.Second, model.Ptr(3)},
-		"after 5 s":  {6 * time.Second, nil},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, testRecord(), config.LockSetting{})
-			h.start()
-			h.send(reached("STATE_CHANGED_OPEN", model.Ptr(3)))
-			h.advance(c.after)
-			h.send(reached("STATE_CHANGED_LATCH", c.key))
-			if last := h.pub.events[len(h.pub.events)-1]; last.EventType != model.EventUnlocked {
-				t.Fatalf("events %+v", h.pub.events)
-			}
-		})
+	last := h.pub.events[len(h.pub.events)-1]
+	if last.EventType != model.EventUnlocked || last.Source != model.SourceUnknown || h.lock() != "UNLOCKED" {
+		t.Fatalf("event %+v lock %s", last, h.lock())
 	}
 }
 

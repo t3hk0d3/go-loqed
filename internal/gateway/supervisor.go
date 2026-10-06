@@ -107,7 +107,6 @@ type Timing struct {
 	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
 	StaleGrace        time.Duration
 	DuplicateWindow   time.Duration // same event from the same feed within this is a duplicate
-	AutoLatchWindow   time.Duration // a keyless latch this soon after an open is the automatic latch
 	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
 	CommandDeadline   time.Duration // LOCK/UNLOCK: no attempt starts later than this after arrival
 	OpenDeadline      time.Duration // OPEN: same
@@ -127,7 +126,7 @@ func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 		StatusEventWindow: 5 * time.Minute, StatusMoveWindow: 3 * time.Minute,
 		CloudConfirm: 5 * time.Second, CloudPoll: time.Minute, CloudPollSpacing: pollSpacing,
 		StaleGrace:      10 * time.Minute,
-		DuplicateWindow: 10 * time.Second, AutoLatchWindow: 5 * time.Second, GatewayWindow: time.Minute,
+		DuplicateWindow: 10 * time.Second, GatewayWindow: time.Minute,
 		CommandDeadline: 30 * time.Second, OpenDeadline: 10 * time.Second,
 		LocalCutoff: 10 * time.Second, OpenLocalCutoff: 3 * time.Second, AlreadyThere: 5 * time.Second,
 		EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
@@ -210,7 +209,6 @@ type Supervisor struct {
 
 	seen              [2][]feedEvent // recent events per feed (duplicate drop)
 	held              []heldCloud    // cloud copies waiting for their bridge copy
-	lastOpenAt        time.Time      // last STATE_CHANGED_OPEN (automatic latch)
 	lastCommandSentAt time.Time      // last gateway command written to the bridge or cloud
 
 	warned map[string]*warnState
@@ -440,10 +438,6 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 	if t.SetBolt {
 		s.lastBoltEventAt = now
 	}
-	autoLatch := s.isAutoLatch(now, eventType, key, t)
-	if t.SetBolt && t.Bolt == loqed.BoltOpen {
-		s.lastOpenAt = now
-	}
 	s.lastEventAt = now
 	name := s.keyName(key, cloudKeyName)
 	at := now.UTC().Truncate(time.Second)
@@ -452,9 +446,6 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 		s.lastBridgeEvent = &recentEvent{eventType: strings.ToUpper(eventType), keyID: key, at: now}
 	}
 	s.publish()
-	if autoLatch {
-		return
-	}
 	source := model.SourceFor(eventType, key, s.isGatewayKey(key) && s.gatewayActive(now))
 	ev := model.Event{EventType: t.Event, Reason: eventType, Source: source, KeyLocalID: key, KeyName: name}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {

@@ -30,7 +30,7 @@ The project styleguide is `CLAUDE.md` (Conventions, Safety invariants, Secrets) 
 - A request is retried only after `loqed.ErrUnreachable` (or an unusable bridge client). It is never retried after `ErrNoResponse`, after any bridge answer or after any cloud answer. Every attempt is signed afresh.
 - `WebhookConfirm` = **30 s**. One more `/status` is read **60 s** after that if the command is still unresolved. After `MOTOR_STALL`, `/status` is read once **30 s** later.
 - `/status` bolt data is applied only when no webhook changed the bolt in the last **5 min**, or when it shows the expected target. A read within **3 min** of a command or `GO_TO_STATE_*` that still shows the previous state is inconclusive: the bolt is left unchanged and `state_stale` is set.
-- "Already there" grace: **5 s**. Gateway-source window: **60 s**. Auto-latch window: **5 s**. Cloud/bridge match window: **30 s**. Duplicate window: **10 s**.
+- "Already there" grace: **5 s**. Gateway-source window: **60 s**. Cloud/bridge match window: **30 s**. Duplicate window: **10 s**.
 - Key ids: a real key is **0..254**. **255**, `""`, `null`, absent or out of range mean no key → `nil`, and the event source is `unknown`.
 - `command_status` (retained) is `{"command","id","status","via","attempts","error","received_at","updated_at"}`.
   - `status` is one of `pending`, `sending`, `sent`, `accepted`, `confirmed`, `failed`, `expired`, `superseded`.
@@ -67,7 +67,7 @@ internal/hass/client.go              JSON commands with id, PublishCommandStatus
 internal/hass/discovery.go           Last command + Token expires sensors, signal % units
 internal/gateway/supervisor.go       Timing constants, wake timer in Run, event source, publish token expiry
 internal/gateway/statushint.go (new) /status hint rules and confirmation re-reads
-internal/gateway/eventfeed.go  (new) duplicate drop, cloud/bridge matching in either order, auto-latch
+internal/gateway/eventfeed.go  (new) duplicate drop, cloud/bridge matching in either order
 internal/gateway/pipeline.go   (new) command pipeline (Submit, delivery, confirmation)
 internal/gateway/commands.go         removed (logic moves to pipeline.go)
 internal/gateway/cloudhub.go         ErrKeyDeleted → token invalidation, no resend
@@ -405,12 +405,10 @@ duplicates
         - drops the second delivery (no state publish, no event)
     On the same event_type and key more than 10 s apart
         - processes both
-auto-latch
-    On STATE_CHANGED_LATCH with no key within 5 s of STATE_CHANGED_OPEN
+automatic latch (revised 2026-10-06: no filtering, the gateway is a faithful bridge)
+    On STATE_CHANGED_LATCH with no key shortly after STATE_CHANGED_OPEN
         - sets lock UNLOCKED and bolt day_lock
-        - publishes the state document but no "unlocked" event
-    On STATE_CHANGED_LATCH with a key, or more than 5 s after the open
-        - publishes the "unlocked" event as usual
+        - publishes an "unlocked" event with source unknown
 event source
     On an event without a key
         - source "unknown"

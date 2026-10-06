@@ -377,7 +377,7 @@ Event entity normalized `event_types`: `locked`, `unlocked`, `opened`, `locking`
 
 Event attributes: `reason` (raw `event_type`), `source`, `key_local_id` (null for no key), `key_name`. `source` is decided in this order: no key → `unknown`; the key is the gateway's own `local_id` and a gateway command is in flight or was sent in the last 60 s → `gateway`; otherwise parsed from the raw type (`touch`, `twist_assist`, `instant_open`, `remote` for `*_REMOTE_*`, `other`). The `manual` source value is dropped: it cannot be distinguished from system actions. `remote` means "another key acting remotely" (the app over BLE, another integration, the cloud), not necessarily the bridge.
 
-The automatic return to day_lock after an open (a `STATE_CHANGED_LATCH` with no key within 5 s of `STATE_CHANGED_OPEN`) updates state to `UNLOCKED` but publishes no separate `unlocked` event.
+The gateway is a faithful bridge: every state change the lock reports is published, including the automatic return to day_lock after an open (an `unlocked` event with source `unknown`). Only repeat deliveries of the same event are dropped (below).
 
 `key_name` priority: `lock_settings.<lock>.key_names[key_local_id]` → cloud webhook `key_name_user` → null. Account e-mail and account/admin names are never decoded, published or logged.
 

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/t3hk0d3/go-loqed/cloud"
-	"github.com/t3hk0d3/go-loqed/internal/model"
 )
 
 // feed is where a lock event came from. LOQED may deliver each cloud event
@@ -81,11 +80,4 @@ func (s *Supervisor) gatewayActive(now time.Time) bool {
 func (s *Supervisor) isGatewayKey(key *int) bool {
 	id := s.Record().LocalID
 	return key != nil && id != nil && *key == *id
-}
-
-// isAutoLatch: the lock returns to day_lock by itself (no key) shortly
-// after an open; that is not a separate "unlocked" event.
-func (s *Supervisor) isAutoLatch(now time.Time, eventType string, key *int, t model.Transition) bool {
-	return key == nil && t.Event == model.EventUnlocked && strings.HasPrefix(strings.ToUpper(eventType), "STATE_CHANGED_LATCH") &&
-		!s.lastOpenAt.IsZero() && now.Sub(s.lastOpenAt) <= s.t.AutoLatchWindow
 }
