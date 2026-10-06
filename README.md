@@ -7,9 +7,10 @@
 
 ## Why loqed-mqtt instead of the built-in integration
 
-- **More reliable.** Careful retries and automatic cloud fallback when the
-  bridge drops off Wi-Fi, without going over LOQED's limit of 12 status reads
-  per 12 hours. You don't need retry or fallback logic in your automations.
+- **More reliable.** Careful retries, and automatic cloud fallback when the
+  local network gets in the way (separate VLANs, firewall rules, a bridge that
+  changed its IP), without going over LOQED's limit of 12 status reads per 12
+  hours. You don't need retry or fallback logic in your automations.
 - **Safer commands.** A command counts as done only when the lock confirms
   it, and `OPEN` is never sent twice. Your automations can act on a confirmed
   result or a `command_failed` event instead of hoping the door locked.
