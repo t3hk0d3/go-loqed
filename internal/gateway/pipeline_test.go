@@ -619,6 +619,7 @@ func TestNoConfirmationWithinThirtySeconds(t *testing.T) {
 func TestCloudPollShowingTargetConfirms(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
 	h.toCloud()
 	h.cmd(model.CommandLock, "")
 	h.cloud.locks[0].BoltState = loqed.BoltNightLock
@@ -759,15 +760,15 @@ func TestFallbackCommandIsConfirmedViaCloud(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.bridge.commandErrs = unreachable(100)
-	h.cloud.locks[0].BoltState = loqed.BoltNightLock
-	h.cmd(model.CommandUnlock, "")
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.cmd(model.CommandLock, "") // the lock is in day_lock
 	h.step(20 * time.Second)
 	if len(h.cloud.commands) != 1 {
 		t.Fatalf("cloud %v", h.cloud.commands)
 	}
-	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.cloud.locks[0].BoltState = loqed.BoltNightLock
 	h.run(5 * time.Second)
-	if h.lock() != "UNLOCKED" || h.cloud.calls[len(h.cloud.calls)-1] != PriorityConfirm || h.lastStatus().Status != model.StatusConfirmed {
+	if h.lock() != "LOCKED" || h.cloud.calls[len(h.cloud.calls)-1] != PriorityConfirm || h.lastStatus().Status != model.StatusConfirmed {
 		t.Fatalf("lock %s calls %v %+v", h.lock(), h.cloud.calls, h.lastStatus())
 	}
 }
@@ -795,6 +796,30 @@ func TestUnconfirmedCommandIsConfirmedByLateWebhook(t *testing.T) {
 	}
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", ourKey))
 	if st := h.lastStatus(); st.Status != model.StatusConfirmed || st.Error != nil {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// Observed 2026-10-06 with a deleted key: the bridge accepts the request,
+// the lock ignores it, and /status still shows the state the lock was
+// already in. That must not confirm the command.
+func TestReadShowingUnchangedStateDoesNotConfirm(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start() // day_lock
+	h.cmd(model.CommandUnlock, "")
+	h.run(30 * time.Second)
+	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailNoConfirmation {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestCloudPollShowingUnchangedStateDoesNotConfirm(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.toCloud() // the cloud reports night_lock
+	h.cmd(model.CommandLock, "")
+	h.run(15 * time.Second)
+	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailNoConfirmation {
 		t.Fatalf("status %+v", st)
 	}
 }

@@ -46,8 +46,9 @@ type command struct {
 	lastLocalErr  error
 	refreshAfter  bool // refresh the lock's credentials once it resolves
 
-	written   bool      // a request may have reached the bridge or cloud
-	sentAt    time.Time // 2xx from the bridge or cloud
+	from      loqed.BoltState // bolt state when the first request went out
+	written   bool            // a request may have reached the bridge or cloud
+	sentAt    time.Time       // 2xx from the bridge or cloud
 	confirmBy time.Time
 	settleAt  time.Time // accepted while already in the target state
 }
@@ -183,6 +184,9 @@ func (p *commandPipeline) step(ctx context.Context, now time.Time) {
 
 func (p *commandPipeline) attempt(ctx context.Context, now time.Time, a *command) {
 	s := p.s
+	if a.attempts == 0 {
+		a.from = s.state.BoltState
+	}
 	switch {
 	case s.mode == model.ModeOffline:
 		p.fail(ctx, now, a, model.FailOffline, errors.New("the lock is offline"))
@@ -350,11 +354,18 @@ func (p *commandPipeline) onReached(ctx context.Context, now time.Time, bolt loq
 	p.lateConfirm(ctx, now, bolt, jammed)
 }
 
+// showsChange: a read showing the target proves the command only if the
+// lock was elsewhere when it was sent (a lock that ignored the command, for
+// example after its key was deleted, still reads as the old state).
+func (c *command) showsChange(bolt loqed.BoltState) bool {
+	return bolt == c.target() && c.from != c.target()
+}
+
 // onStatus: a successful /status read that showed bolt.
 func (p *commandPipeline) onStatus(ctx context.Context, now time.Time, bolt loqed.BoltState) {
 	defer p.step(ctx, now)
 	if a := p.active; a != nil && a.inFlight() {
-		if bolt == a.target() {
+		if a.showsChange(bolt) {
 			p.confirm(ctx, now, a)
 		}
 		return
@@ -372,7 +383,7 @@ func (p *commandPipeline) onPoll(ctx context.Context, now time.Time, bolt loqed.
 		return
 	}
 	switch {
-	case bolt == a.target():
+	case a.showsChange(bolt):
 		p.confirm(ctx, now, a)
 	case final:
 		p.noConfirmation(ctx, now, a)
@@ -385,7 +396,7 @@ func (p *commandPipeline) onPoll(ctx context.Context, now time.Time, bolt loqed.
 // to the same state is someone else's.
 func (p *commandPipeline) lateConfirm(ctx context.Context, now time.Time, bolt loqed.BoltState, jammed bool) {
 	w := p.watch
-	if w == nil || jammed || bolt != w.target() || w.status != model.StatusFailed || now.Sub(w.sentAt) > p.s.t.StatusMoveWindow ||
+	if w == nil || jammed || !w.showsChange(bolt) || w.status != model.StatusFailed || now.Sub(w.sentAt) > p.s.t.StatusMoveWindow ||
 		(w.errClass != model.FailNoResponse && w.errClass != model.FailNoConfirmation) {
 		return
 	}
