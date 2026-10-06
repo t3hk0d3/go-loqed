@@ -1,0 +1,27 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - unconvert
+  settings:
+    misspell:
+      ignore-rules:
+        - mosquitto # the MQTT broker
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Tests use fixed fake secrets and ad-hoc servers.
+      - path: _test\.go
+        linters: [gosec]
+      # Integer conversions are range-checked where it matters (key ids,
+      # timestamps from time.Now); URLs come from configuration, not users.
+      - linters: [gosec]
+        text: "G115|G107|G704"
+formatters:
+  enable:
+    - gofmt
