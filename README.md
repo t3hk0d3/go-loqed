@@ -33,8 +33,16 @@ every setting.
 | `loqed/<id>/event` | no | JSON lock event (incl. `command_failed`) |
 | `loqed/<id>/command` | must not be retained | `LOCK`, `UNLOCK` or `OPEN`, or JSON `{"command":"LOCK","id":"my-id"}` |
 | `loqed/<id>/command_status` | yes | JSON status of the last command |
+| `loqed/<id>/cloud_webhook` | must not be retained | a LOQED cloud webhook body, forwarded unchanged (only with `mqtt.cloud_webhooks: true`) |
 
-Retained messages on the command topic are ignored.
+Retained messages on the `command` and `cloud_webhook` topics are ignored.
+
+`cloud_webhook` lets a relay, typically a Home Assistant automation with a
+Home Assistant Cloud (Nabu Casa) webhook trigger, deliver LOQED cloud
+webhooks without a reverse proxy. The add-on documentation
+(`addon/DOCS.md`, "Cloud webhooks") has the automation. The topic's `<id>`
+selects the lock, exactly like the per-lock `/cloud/<secret>/<id>` URL; a
+body for another lock is dropped with a warning.
 
 `command_status` follows each command:
 

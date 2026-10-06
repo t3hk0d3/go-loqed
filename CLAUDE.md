@@ -62,7 +62,7 @@ addon/                       HA add-on config.yaml, DOCS.md, translations
 
 - A command is retried (locally with backoff, then once via the cloud) **only** after `ErrUnreachable` (or an unusable bridge client) or `ErrUnauthorized` — **never** after `ErrNoResponse` or any answer. A slow bridge that got `OPEN` must not get a second `OPEN`. Every attempt is signed afresh. Bridge/cloud HTTP clients use `DisableKeepAlives` so net/http never silently replays a request. Command pipeline: `internal/gateway/pipeline.go` (spec 5.8).
 - The bridge answers every `/to_lock` with 200; only webhooks (`GO_TO_STATE_*` with the gateway key, then `STATE_CHANGED_*`) confirm a command. `/status` lags and is only a hint.
-- Retained messages on `<base>/<id>/command` are ignored (a retained `OPEN` must never unlatch the door on reconnect).
+- Retained messages on `<base>/<id>/command` and `<base>/<id>/cloud_webhook` are ignored (a retained `OPEN` must never unlatch the door on reconnect; a retained cloud webhook would replay an event on every reconnect).
 - LOQED blocks an account after >12 cloud calls in 12 h. The gateway's `cloud_budget` (default 10, max 12) is persisted across restarts; crash loops must not exceed it.
 - Bridge wire details: headers exactly `TIMESTAMP` / `HASH` (upper case on the wire), webhook timestamp tolerance ±10 s, command query escaping replaces only `+` and `=`. State-reached events derive bolt state from `event_type`, never `requested_state`.
 - HA must not show a definite state older than reality without `state_stale`.

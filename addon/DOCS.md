@@ -67,10 +67,70 @@ cloud does not provide local credentials for a lock.
   (default 10, also across restarts), so in cloud mode without cloud
   webhooks the lock state can be more than an hour old. The `state_stale`
   attribute shows when it is.
-- **Cloud webhooks (optional).** Set `webhook.public_url` (scheme and host
-  only, for example `https://loqed.example.com`) to an address that reaches
-  this add-on from the internet through a reverse proxy that forwards only
-  the `/cloud/` path, unchanged, and does not log request paths (the path
-  contains the secret). LOQED registers cloud webhooks per lock. At startup
-  the add-on log shows one URL per lock; register each URL for its own lock
-  in the API section of https://app.loqed.com.
+- **Cloud webhooks (optional).** LOQED's cloud can call a URL for every lock
+  event, which keeps the state fresh when the bridge is unreachable. LOQED
+  registers cloud webhooks per lock. There are two ways to receive them; see
+  [Cloud webhooks](#cloud-webhooks) below.
+
+## Cloud webhooks
+
+### Through a reverse proxy
+
+Set `webhook.public_url` (scheme and host only, for example
+`https://loqed.example.com`) to an address that reaches this add-on from the
+internet through a reverse proxy that forwards only the `/cloud/` path,
+unchanged, and does not log request paths (the path contains the secret). At
+startup the add-on log shows one URL per lock; register each URL for its own
+lock in the API section of https://app.loqed.com.
+
+### Through Home Assistant Cloud and MQTT
+
+Use this when you have no reverse proxy, or Home Assistant Cloud (Nabu Casa)
+is already set up. A Home Assistant automation receives the webhook and
+publishes its body, unchanged, to the lock's `cloud_webhook` MQTT topic.
+
+1. Set `mqtt.cloud_webhooks: true` and restart the add-on. The log shows each
+   lock's topic, for example `topic=loqed/Yq1g/cloud_webhook`. The part
+   between `loqed/` and `/cloud_webhook` is the lock's **topic id**.
+2. Create this automation (one webhook trigger per lock; the trigger `id` is
+   that lock's topic id, and each `webhook_id` is a long random string):
+
+   ```yaml
+   alias: LOQED cloud webhooks to MQTT
+   mode: parallel
+   max: 20
+   triggers:
+     - trigger: webhook
+       webhook_id: loqed-front-door-REPLACE-WITH-RANDOM
+       id: Yq1g
+       allowed_methods: [POST]
+       local_only: false
+   actions:
+     - action: mqtt.publish
+       data:
+         topic: "loqed/{{ trigger.id }}/cloud_webhook"
+         payload: "{{ trigger.json | to_json }}"
+         qos: 1
+         retain: false
+   ```
+
+3. In the automation editor, open each webhook trigger and copy its Home
+   Assistant Cloud URL. Register that URL **for the same lock** in the API
+   section of https://app.loqed.com.
+
+Things to keep in mind:
+
+- **`retain: false` is required.** Retained `cloud_webhook` messages are
+  ignored (a retained body would be replayed as a new event on every
+  reconnect); the log says so.
+- **One URL per lock.** Don't point one lock's URL at another lock's topic.
+  The first webhook on a topic binds it to that lock; a later body for a
+  different lock is dropped with a warning.
+- **The body is forwarded as LOQED sends it.** It includes your account
+  e-mail and name. The add-on never reads or logs those fields, but anything
+  else subscribed to `loqed/#` can see them.
+- **Trust.** The Home Assistant Cloud URL is the secret: treat it like a
+  password. Anyone allowed to publish to `loqed/<id>/cloud_webhook` can
+  inject lock events, so restrict it with broker ACLs, as for `command`.
+  LOQED does not sign cloud webhooks, so the gateway cannot check where a
+  body came from.
