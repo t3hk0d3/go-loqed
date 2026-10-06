@@ -299,7 +299,7 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 	}
 	switch e := ev.(type) {
 	case bridge.StateReachedEvent:
-		if s.isDuplicate(feedBridge, e.EventType, e.KeyLocalID, now) {
+		if s.isDuplicate(e.EventType, e.KeyLocalID, now) {
 			return
 		}
 		s.state.LockOnline = true
@@ -307,16 +307,14 @@ func (s *Supervisor) onBridgeEvent(ctx context.Context, ev bridge.Event) {
 			s.move = movement{}
 		}
 		s.onReached(now, e.BoltState, e.Jammed)
-		name := s.takeHeld(now, e.EventType, e.KeyLocalID)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, name, model.FromStateReached(e.EventType), feedBridge)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, "", model.FromStateReached(e.EventType))
 		s.cmds.onReached(ctx, now, e.BoltState, e.Jammed, e.KeyLocalID)
 	case bridge.GoToStateEvent:
-		if s.isDuplicate(feedBridge, e.EventType, e.KeyLocalID, now) {
+		if s.isDuplicate(e.EventType, e.KeyLocalID, now) {
 			return
 		}
 		s.startMovement(now, e.GoToState)
-		name := s.takeHeld(now, e.EventType, e.KeyLocalID)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, name, model.FromGoTo(e.GoToState, s.state.Lock), feedBridge)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, "", model.FromGoTo(e.GoToState, s.state.Lock))
 		s.cmds.onGoTo(now, e.GoToState, e.KeyLocalID)
 		if s.confirmAt.IsZero() {
 			s.awaitConfirm(now, e.GoToState) // STATE_CHANGED may be lost

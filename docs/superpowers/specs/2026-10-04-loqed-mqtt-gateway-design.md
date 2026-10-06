@@ -245,6 +245,7 @@ cache_path: /data/locks.json
 cache_max_age: 0             # 0 = never expire by age (checked at startup and hourly at runtime)
 reconcile_interval: 24h      # max interval between /status reconciles in local mode
 liveness_interval: 60s       # TCP probe interval in local mode
+event_dedup_window: 10s      # drop an event repeating the latest one (same event_type and key, any feed) within this; max 30s
 cloud_budget: 10             # max /api/locks/ calls per rolling 12h (account-wide)
 webhook:
   listen: ":8099"
@@ -332,7 +333,7 @@ Modes: `local`, `cloud`, `offline`.
 - `GET /status` only: on entering `local`; `WebhookConfirm` (30 s) after a command or after any `GO_TO_STATE_*` event if no `STATE_CHANGED_*` event reaching the target arrives, and once more 60 s later if still unresolved; after `MOTOR_STALL` (once, 30 s later); when `bolt_state` is `unknown` (at most once per 10 min); while webhook registration is pending (every 10 min); otherwise at most once per `reconcile_interval`. A failed `/status` marks state stale.
 - `/status` is a **hint** (2.1): its `bolt_state` is applied only if no webhook changed the bolt state in the last 5 min, or if it reports the expected target. A `/status` read within 3 min of a command or `GO_TO_STATE_*` that still shows the previous state is inconclusive: the bolt state is left unchanged and `state_stale` is set until a webhook or a later read resolves it. Battery and signal fields from `/status` are always applied.
 - The bridge's webhook list is checked at registration; if it holds more than 3 other webhooks a warning explains that each webhook target delays events and `/status` (2.1).
-- Cloud webhook events (if configured) do not change state while the bridge webhook is registered; they only enrich the matching bridge event (5.7).
+- Cloud webhook events (if configured) are an equal feed: they change state like bridge events; repeats are dropped (5.7).
 - 3 consecutive liveness failures, or 3 consecutive HTTP failures (`ErrUnreachable`/`ErrNoResponse`, 5 s timeout) → cache refresh rule 5. New IP → retry local. Same IP or refresh not possible → `cloud`.
 
 **In `cloud`:**
@@ -382,8 +383,8 @@ The gateway is a faithful bridge: every state change the lock reports is publish
 `key_name` priority: `lock_settings.<lock>.key_names[key_local_id]` → cloud webhook `key_name_user` → null. Account e-mail and account/admin names are never decoded, published or logged.
 
 Event sources by mode:
-- `local`: bridge webhooks only (while the bridge webhook is registered). Cloud and bridge copies of the same event (same lock, `event_type` and key) are matched within 30 s **in either order**: cloud copies usually arrive first. A cloud copy waits up to 30 s for its bridge copy and then only enriches it with `key_name` (republishes the state document; no second event); a cloud copy without a bridge copy after 30 s is dropped.
-- Duplicate deliveries (same lock, `event_type`, key and source feed within 10 s) are dropped.
+- `local`: bridge and cloud webhooks, as equal feeds. Whichever copy of an event arrives first is applied and published (cloud copies usually arrive first).
+- Deduplication (revised 2026-10-06): an event with the same `event_type` and key as the **latest** received lock event, from either feed, within `event_dedup_window` (default 10 s, max 30 s) is dropped. Only the latest event is compared. A dropped cloud copy may still add `key_name` to the state document (no second event).
 - `cloud`: cloud webhooks, if configured.
 - Never from polling: no synthetic events from `/status` or `ListLocks` results. Event delivery is best-effort (webhooks can be lost); documentation states that automations about *whether* the door is locked must use the lock entity.
 

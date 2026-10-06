@@ -46,6 +46,7 @@ schema:
   cache_max_age: str?
   reconcile_interval: str?
   liveness_interval: str?
+  event_dedup_window: str?
   cloud_budget: int(1,12)?
   webhook:
     private_url: str?

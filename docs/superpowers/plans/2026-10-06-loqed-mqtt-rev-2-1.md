@@ -67,7 +67,7 @@ internal/hass/client.go              JSON commands with id, PublishCommandStatus
 internal/hass/discovery.go           Last command + Token expires sensors, signal % units
 internal/gateway/supervisor.go       Timing constants, wake timer in Run, event source, publish token expiry
 internal/gateway/statushint.go (new) /status hint rules and confirmation re-reads
-internal/gateway/eventfeed.go  (new) duplicate drop, cloud/bridge matching in either order
+internal/gateway/eventfeed.go  (new) duplicate drop against the latest event (event_dedup_window)
 internal/gateway/pipeline.go   (new) command pipeline (Submit, delivery, confirmation)
 internal/gateway/commands.go         removed (logic moves to pipeline.go)
 internal/gateway/cloudhub.go         ErrKeyDeleted → token invalidation, no resend
@@ -383,8 +383,7 @@ ensureWebhook
 **Interfaces:**
 - Consumes: `model.SourceFor` (Task 3) and the Timing windows (Task 5).
 - Produces:
-  - `type feed int` (`feedBridge`, `feedCloud`).
-  - `func (s *Supervisor) isDuplicate(f feed, eventType string, key *int, now time.Time) bool`.
+  - `func (s *Supervisor) isDuplicate(eventType string, key *int, now time.Time) bool` (revised: compares with the latest event only; no per-feed lists).
   - `func (s *Supervisor) gatewayActive(now time.Time) bool`: a command is in flight or one was sent within `GatewayWindow`. It is backed by `lastCommandSentAt`, set by Task 7.
 
 Behavior:
@@ -392,19 +391,14 @@ Behavior:
 ```
 event feed (local mode, bridge webhook registered)
     On a cloud state or go-to event with no bridge copy yet
-        - publishes nothing at once and holds it for up to 30 s
-    On the bridge copy within 30 s of a held cloud copy (same event_type and key)
-        - publishes one event whose key_name comes from the cloud key_name_user (unless key_names overrides it)
-        - drops the held cloud copy
-    On a cloud copy after its bridge copy within 30 s
-        - only adds key_name to the state document; no second event (today's enrichment)
-    When a held cloud copy finds no bridge copy within 30 s
-        - drops it without publishing
-duplicates
-    On the same event_type and key from the same feed within 10 s
-        - drops the second delivery (no state publish, no event)
-    On the same event_type and key more than 10 s apart
-        - processes both
+        - (revised 2026-10-06) publishes it at once: the first copy from either feed wins
+    On a later copy of the latest event (same event_type and key, any feed) within event_dedup_window
+        - drops it; a cloud copy may still add key_name to the state document (no second event)
+duplicates (revised 2026-10-06: only the latest event is compared; window configurable, default 10 s, max 30 s)
+    On the same event_type and key as the latest event within the window
+        - drops the delivery (no state publish, no event)
+    On a repeat after another event, or outside the window
+        - processes it
 automatic latch (revised 2026-10-06: no filtering, the gateway is a faithful bridge)
     On STATE_CHANGED_LATCH with no key shortly after STATE_CHANGED_OPEN
         - sets lock UNLOCKED and bolt day_lock

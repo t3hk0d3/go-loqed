@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -106,14 +105,13 @@ type Timing struct {
 	CloudPoll         time.Duration // how often cloud mode asks the budget for a poll
 	CloudPollSpacing  time.Duration // budget spacing of background polls (12h / cloud_budget)
 	StaleGrace        time.Duration
-	DuplicateWindow   time.Duration // same event from the same feed within this is a duplicate
+	DuplicateWindow   time.Duration // a repeat of the latest event within this is a duplicate (event_dedup_window)
 	GatewayWindow     time.Duration // events with the gateway key this soon after a command are the gateway's
 	CommandDeadline   time.Duration // LOCK/UNLOCK: no attempt starts later than this after arrival
 	OpenDeadline      time.Duration // OPEN: same
 	LocalCutoff       time.Duration // LOCK/UNLOCK: local retries stop this long before the deadline
 	OpenLocalCutoff   time.Duration // OPEN: same
 	AlreadyThere      time.Duration // accepted in the target state: confirmed if nothing moves this long
-	EnrichWindow      time.Duration
 	RequestTimeout    time.Duration
 	FailureThreshold  int
 }
@@ -129,7 +127,7 @@ func DefaultTiming(liveness, reconcile, pollSpacing time.Duration) Timing {
 		DuplicateWindow: 10 * time.Second, GatewayWindow: time.Minute,
 		CommandDeadline: 30 * time.Second, OpenDeadline: 10 * time.Second,
 		LocalCutoff: 10 * time.Second, OpenLocalCutoff: 3 * time.Second, AlreadyThere: 5 * time.Second,
-		EnrichWindow: 30 * time.Second, RequestTimeout: 5 * time.Second,
+		RequestTimeout:   5 * time.Second,
 		FailureThreshold: 3,
 	}
 }
@@ -138,12 +136,6 @@ type Health struct {
 	Mode        model.Mode `json:"mode"`
 	Available   bool       `json:"available"`
 	LastEventAt *time.Time `json:"last_event_at"`
-}
-
-type recentEvent struct {
-	eventType string
-	keyID     *int
-	at        time.Time
 }
 
 const warnRepeatWindow = 10 * time.Minute
@@ -204,12 +196,10 @@ type Supervisor struct {
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
 	lastPollAt       time.Time // last successful cloud poll
-	lastBridgeEvent  *recentEvent
 	lastCloudEventAt time.Time
 
-	seen              [2][]feedEvent // recent events per feed (duplicate drop)
-	held              []heldCloud    // cloud copies waiting for their bridge copy
-	lastCommandSentAt time.Time      // last gateway command written to the bridge or cloud
+	lastLockEvent     *lockEvent // latest lock event from either feed (duplicate drop)
+	lastCommandSentAt time.Time  // last gateway command written to the bridge or cloud
 
 	warned map[string]*warnState
 
@@ -331,7 +321,6 @@ func (s *Supervisor) tick(ctx context.Context) {
 		return // shutting down: no new requests
 	}
 	now := s.d.Now()
-	s.pruneHeld(now)
 	if !s.cloudConfirmAt.IsZero() && !now.Before(s.cloudConfirmAt) {
 		s.cloudConfirmAt = time.Time{}
 		s.pollCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
@@ -429,7 +418,7 @@ func (s *Supervisor) warn(msg string, args ...any) {
 }
 
 // recordEvent applies a lock event, publishes state and the HA event.
-func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, cloudKeyName string, t model.Transition, f feed) {
+func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, cloudKeyName string, t model.Transition) {
 	s.state.Apply(t)
 	if t.SetBolt || t.SetLock {
 		s.state.StateStale = false
@@ -442,9 +431,6 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 	name := s.keyName(key, cloudKeyName)
 	at := now.UTC().Truncate(time.Second)
 	s.state.LastEvent, s.state.LastKeyID, s.state.LastKeyName, s.state.LastEventAt = eventType, key, name, &at
-	if f == feedBridge {
-		s.lastBridgeEvent = &recentEvent{eventType: strings.ToUpper(eventType), keyID: key, at: now}
-	}
 	s.publish()
 	source := model.SourceFor(eventType, key, s.isGatewayKey(key) && s.gatewayActive(now))
 	ev := model.Event{EventType: t.Event, Reason: eventType, Source: source, KeyLocalID: key, KeyName: name}

@@ -71,7 +71,7 @@ func sampleFor(key string) any {
 		return true
 	case "cloud_budget":
 		return 10
-	case "cache_max_age", "reconcile_interval", "liveness_interval":
+	case "cache_max_age", "reconcile_interval", "liveness_interval", "event_dedup_window":
 		return "1h"
 	case "log_level":
 		return "info"

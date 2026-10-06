@@ -21,46 +21,70 @@ func bridgeGoTo(key *int) BridgeEventMsg {
 		GoToState: loqed.BoltNightLock, KeyLocalID: key}}
 }
 
-func TestCloudCopyFirstIsMergedIntoBridgeEvent(t *testing.T) {
+func TestFirstCopyIsPublishedAndLaterCopyDropped(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
-	states := len(h.pub.states)
 	h.send(cloudGoTo("Hallway phone", model.Ptr(3)))
-	if len(h.pub.states) != states || len(h.pub.events) != 0 {
-		t.Fatal("a cloud copy must wait for its bridge copy")
+	if len(h.pub.events) != 1 || h.lock() != "LOCKING" {
+		t.Fatalf("the first copy (cloud) must be published at once: %+v lock %s", h.pub.events, h.lock())
+	}
+	if n := h.pub.events[0].KeyName; n == nil || *n != "Hallway phone" {
+		t.Fatalf("event %+v", h.pub.events[0])
 	}
 	h.advance(700 * time.Millisecond)
 	h.send(bridgeGoTo(model.Ptr(3)))
 	if len(h.pub.events) != 1 {
-		t.Fatalf("want exactly one event, got %+v", h.pub.events)
-	}
-	if n := h.pub.events[0].KeyName; n == nil || *n != "Hallway phone" {
-		t.Fatalf("the cloud key name must name the bridge event: %+v", h.pub.events[0])
-	}
-	h.run(time.Minute)
-	if len(h.pub.events) != 1 {
-		t.Fatalf("the held copy must be consumed: %+v", h.pub.events)
+		t.Fatalf("the bridge copy is a duplicate: %+v", h.pub.events)
 	}
 }
 
-func TestHeldCloudCopyWithoutBridgeCopyIsDropped(t *testing.T) {
+func TestLaterCloudCopyNamesTheBridgeEvent(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
-	states := len(h.pub.states)
+	h.send(bridgeGoTo(model.Ptr(3)))
+	h.advance(500 * time.Millisecond)
 	h.send(cloudGoTo("Hallway phone", model.Ptr(3)))
-	h.run(31 * time.Second)
-	if len(h.pub.states) != states || len(h.pub.events) != 0 {
-		t.Fatalf("an unmatched cloud copy must never publish: %+v", h.pub.events)
+	if len(h.pub.events) != 1 {
+		t.Fatalf("events %+v", h.pub.events)
+	}
+	if n := h.state().LastKeyName; n == nil || *n != "Hallway phone" {
+		t.Fatalf("state %+v", h.state())
 	}
 }
 
-func TestCloudCopyWithOtherKeyIsNotMerged(t *testing.T) {
+func TestCopiesWithOtherKeysAreSeparateEvents(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.send(cloudGoTo("Someone else", model.Ptr(5)))
 	h.send(bridgeGoTo(model.Ptr(3)))
-	if n := h.pub.events[0].KeyName; n != nil {
-		t.Fatalf("a different key must not name the event: %s", *n)
+	if len(h.pub.events) != 2 || h.pub.events[1].KeyName != nil {
+		t.Fatalf("events %+v", h.pub.events)
+	}
+}
+
+// Only the latest event is compared (user decision): a repeat that arrives
+// after another event is published again.
+func TestOnlyTheLatestEventIsCompared(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.send(bridgeGoTo(model.Ptr(3)))
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
+	h.advance(2 * time.Second)
+	h.send(cloudGoTo("", model.Ptr(3)))
+	if len(h.pub.events) != 3 {
+		t.Fatalf("events %+v", h.pub.events)
+	}
+}
+
+func TestDedupWindowIsConfigurable(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.s.t.DuplicateWindow = 2 * time.Second
+	h.start()
+	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
+	h.advance(3 * time.Second)
+	h.send(cloudReached(""))
+	if len(h.pub.events) != 2 {
+		t.Fatalf("a repeat outside the window is a new event: %+v", h.pub.events)
 	}
 }
 

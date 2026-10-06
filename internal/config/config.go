@@ -60,6 +60,7 @@ type Config struct {
 	CacheMaxAge       Duration        `yaml:"cache_max_age"`
 	ReconcileInterval Duration        `yaml:"reconcile_interval"`
 	LivenessInterval  Duration        `yaml:"liveness_interval"`
+	EventDedupWindow  Duration        `yaml:"event_dedup_window"`
 	CloudBudget       int             `yaml:"cloud_budget"`
 	Webhook           Webhook         `yaml:"webhook"`
 	MQTT              MQTT            `yaml:"mqtt"`
@@ -209,11 +210,16 @@ func (k KeyNames) addPair(pair string) error {
 	return nil
 }
 
+// MaxEventDedupWindow caps event_dedup_window: a longer window could swallow
+// a real repeated action.
+const MaxEventDedupWindow = 30 * time.Second
+
 func Defaults() Config {
 	return Config{
 		CachePath:         "/data/locks.json",
 		ReconcileInterval: Duration(24 * time.Hour),
 		LivenessInterval:  Duration(60 * time.Second),
+		EventDedupWindow:  Duration(10 * time.Second),
 		CloudBudget:       10,
 		Webhook:           Webhook{Listen: ":8099"},
 		MQTT:              MQTT{ClientID: "loqed-mqtt", BaseTopic: "loqed"},
@@ -234,6 +240,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.LivenessInterval == 0 {
 		c.LivenessInterval = d.LivenessInterval
+	}
+	if c.EventDedupWindow == 0 {
+		c.EventDedupWindow = d.EventDedupWindow
 	}
 	if c.CloudBudget == 0 {
 		c.CloudBudget = d.CloudBudget
@@ -283,6 +292,9 @@ func (c Config) Validate() error {
 	}
 	if c.LivenessInterval.D() < 5*time.Second {
 		add("liveness_interval must be at least 5s")
+	}
+	if c.EventDedupWindow < 0 || c.EventDedupWindow.D() > MaxEventDedupWindow {
+		add("event_dedup_window must be between 0s and 30s")
 	}
 	if c.ReconcileInterval.D() < time.Minute {
 		add("reconcile_interval must be at least 1m")

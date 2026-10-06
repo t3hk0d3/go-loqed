@@ -29,7 +29,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.CachePath != "/data/locks.json" || cfg.ReconcileInterval.D() != 24*time.Hour || cfg.LivenessInterval.D() != time.Minute ||
-		cfg.CloudBudget != 10 || cfg.Webhook.Listen != ":8099" || cfg.MQTT.ClientID != "loqed-mqtt" || cfg.MQTT.BaseTopic != "loqed" ||
+		cfg.EventDedupWindow.D() != 10*time.Second || cfg.CloudBudget != 10 || cfg.Webhook.Listen != ":8099" || cfg.MQTT.ClientID != "loqed-mqtt" || cfg.MQTT.BaseTopic != "loqed" ||
 		!cfg.HomeAssistant.Enabled || cfg.HomeAssistant.DiscoveryPrefix != "homeassistant" || cfg.LogLevel != "info" {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
@@ -37,7 +37,7 @@ func TestDefaults(t *testing.T) {
 
 func TestPrecedenceOptionsThenYAMLThenEnv(t *testing.T) {
 	opts := write(t, "options.json", `{"cloud_token":"from-options","mqtt":{"base_topic":"opt","url":"tcp://opt:1883"},"cloud_budget":5}`)
-	yml := write(t, "config.yaml", "mqtt:\n  base_topic: yaml\nliveness_interval: 30s\n")
+	yml := write(t, "config.yaml", "mqtt:\n  base_topic: yaml\nliveness_interval: 30s\nevent_dedup_window: 5s\n")
 	cfg, err := config.Load(config.Sources{OptionsFile: opts, ConfigFile: yml, Environ: []string{
 		"LOQED_MQTT__BASE_TOPIC=env", "LOQED_CLOUD_BUDGET=7", "LOQED_HOMEASSISTANT__ENABLED=false", "PATH=/bin",
 	}})
@@ -45,7 +45,7 @@ func TestPrecedenceOptionsThenYAMLThenEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.CloudToken != "from-options" || cfg.MQTT.URL != "tcp://opt:1883" || cfg.MQTT.BaseTopic != "env" ||
-		cfg.LivenessInterval.D() != 30*time.Second || cfg.CloudBudget != 7 || cfg.HomeAssistant.Enabled {
+		cfg.LivenessInterval.D() != 30*time.Second || cfg.EventDedupWindow.D() != 5*time.Second || cfg.CloudBudget != 7 || cfg.HomeAssistant.Enabled {
 		t.Fatalf("unexpected: %+v", cfg)
 	}
 }
@@ -175,6 +175,7 @@ func TestValidate(t *testing.T) {
 	bad.CloudPassword = "pw"
 	bad.CloudBudget = 20
 	bad.LivenessInterval = config.Duration(time.Second)
+	bad.EventDedupWindow = config.Duration(31 * time.Second)
 	bad.Webhook.PublicURL = "loqed.example.com"
 	bad.Webhook.PrivateURL = "http://10.0.0.5:8099/prefix"
 	bad.LogFormat = "xml"
@@ -186,7 +187,7 @@ func TestValidate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"cloud_password", "cloud_budget", "liveness_interval", "public_url", "private_url must not have a path", "cloud_secret", "base_topic", "log_level", "log_format", "bridge_ip", "bridge_key"} {
+	for _, want := range []string{"cloud_password", "cloud_budget", "liveness_interval", "event_dedup_window", "public_url", "private_url must not have a path", "cloud_secret", "base_topic", "log_level", "log_format", "bridge_ip", "bridge_key"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in %v", want, err)
 		}

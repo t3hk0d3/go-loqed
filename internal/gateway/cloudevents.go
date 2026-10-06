@@ -2,27 +2,19 @@ package gateway
 
 import (
 	"context"
-	"strings"
-	"time"
 
 	"github.com/t3hk0d3/go-loqed/cloud"
 	"github.com/t3hk0d3/go-loqed/internal/model"
 )
 
-// onCloudEvent handles a cloud webhook. While the bridge webhook is
-// registered in local mode it only adds a key name to a matching recent
-// bridge event; otherwise it drives state.
+// onCloudEvent handles a cloud webhook. Cloud and bridge events are equal
+// feeds: whichever copy of an event arrives first is applied, later copies
+// are dropped as duplicates (a cloud copy may still name the event).
 func (s *Supervisor) onCloudEvent(ctx context.Context, e cloud.WebhookEvent) {
 	now := s.d.Now()
 	s.lastCloudEventAt = now
-	lockEvent := e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState
-	if lockEvent && s.isDuplicate(feedCloud, e.EventType, e.KeyLocalID, now) {
-		return
-	}
-	if s.mode == model.ModeLocal && s.webhookOK {
-		if lockEvent && !s.enrichFromCloud(now, e) {
-			s.holdCloud(now, e)
-		}
+	if (e.Kind == cloud.KindStateReached || e.Kind == cloud.KindGoToState) && s.isDuplicate(e.EventType, e.KeyLocalID, now) {
+		s.nameFromDuplicate(e.KeyNameUser)
 		return
 	}
 	if s.mode == model.ModeOffline {
@@ -48,11 +40,11 @@ func (s *Supervisor) onCloudEvent(ctx context.Context, e cloud.WebhookEvent) {
 			s.move = movement{}
 		}
 		s.onReached(now, e.BoltState, e.Jammed)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType), feedCloud)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromStateReached(e.EventType))
 		s.cmds.onReached(ctx, now, e.BoltState, e.Jammed, e.KeyLocalID)
 	case cloud.KindGoToState:
 		s.startMovement(now, e.GoToState)
-		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock), feedCloud)
+		s.recordEvent(now, e.EventType, e.KeyLocalID, e.KeyNameUser, model.FromGoTo(e.GoToState, s.state.Lock))
 		s.cmds.onGoTo(now, e.GoToState, e.KeyLocalID)
 	case cloud.KindSignal:
 		if e.BatteryPercentage != nil && *e.BatteryPercentage >= 0 {
@@ -81,25 +73,4 @@ func (s *Supervisor) onCloudEvent(ctx context.Context, e cloud.WebhookEvent) {
 		}
 		s.publish()
 	}
-}
-
-// enrichFromCloud adds key_name_user to the bridge event it describes:
-// same event type and key id, within EnrichWindow. It never emits an event.
-// It reports whether the cloud copy matched a bridge event.
-func (s *Supervisor) enrichFromCloud(now time.Time, e cloud.WebhookEvent) bool {
-	last := s.lastBridgeEvent
-	if last == nil || !strings.EqualFold(last.eventType, e.EventType) || now.Sub(last.at) > s.t.EnrichWindow ||
-		!sameKey(last.keyID, e.KeyLocalID) {
-		return false
-	}
-	if e.KeyNameUser != "" && s.state.LastKeyName == nil {
-		name := e.KeyNameUser
-		s.state.LastKeyName = &name
-		s.publish()
-	}
-	return true
-}
-
-func sameKey(a, b *int) bool {
-	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }

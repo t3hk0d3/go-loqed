@@ -86,33 +86,27 @@ func TestCloudEventEnrichesMatchingBridgeEvent(t *testing.T) {
 	}
 }
 
-func TestCloudEventWithOtherKeyDoesNotEnrich(t *testing.T) {
+func TestCloudEventWithOtherKeyIsANewEvent(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
 	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(5)))
 	h.send(cloudReached("Someone else")) // key 3
-	if h.state().LastKeyName != nil {
-		t.Fatal("a different key must not name this event")
+	if len(h.pub.events) != 2 {
+		t.Fatalf("events %+v", h.pub.events)
 	}
 }
 
-func TestCloudEventOutsideWindowOrUnmatchedIsDropped(t *testing.T) {
+func TestCloudEventsDriveStateInLocalMode(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
-	states := len(h.pub.states)
-	h.send(cloudReached("x")) // no bridge event yet
-	if len(h.pub.states) != states {
-		t.Fatal("unmatched cloud event must be dropped in local mode")
+	h.send(cloudReached("x")) // no bridge copy (yet)
+	if h.lock() != "LOCKED" || len(h.pub.events) != 1 {
+		t.Fatalf("lock %s events %+v", h.lock(), h.pub.events)
 	}
-	h.run(31 * time.Second) // the held cloud copy expires
-	h.send(reached("STATE_CHANGED_NIGHT_LOCK", model.Ptr(3)))
-	if h.state().LastKeyName != nil {
-		t.Fatal("an expired cloud copy must not name a later bridge event")
-	}
-	h.now = h.now.Add(31 * time.Second)
+	h.advance(11 * time.Second)
 	h.send(cloudReached("late"))
-	if h.state().LastKeyName != nil {
-		t.Fatal("cloud event outside the 30s window must not enrich")
+	if len(h.pub.events) != 2 {
+		t.Fatal("a repeat outside the 10 s window is a new event")
 	}
 }
 
