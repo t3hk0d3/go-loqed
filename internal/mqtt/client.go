@@ -1,6 +1,7 @@
 package mqtt
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,8 @@ type ClientConfig struct {
 	// Discovery publishes Home Assistant discovery; nil disables it.
 	Discovery Discovery
 	Now       func() time.Time // clock for command timestamps; nil = time.Now
+	// CloudWebhooks subscribes to <base>/+/cloud_webhook (mqtt.cloud_webhooks).
+	CloudWebhooks bool
 	// OnRemovedCleared is called with the ids of removed locks whose retained
 	// topics have been cleared on the broker.
 	OnRemovedCleared func(ids []string)
@@ -48,6 +51,17 @@ type LockInfo struct {
 	MacWifi string
 }
 
+// CloudWebhook is a LOQED cloud webhook body relayed over MQTT (for example
+// by a Home Assistant automation). Body is passed on unchanged and must never
+// be logged: it carries personal data.
+type CloudWebhook struct {
+	LockID string // the real lock id, not the topic id
+	Body   []byte
+}
+
+// maxCloudWebhook matches the HTTP cloud webhook body limit.
+const maxCloudWebhook = 64 << 10
+
 // Command is a lock command received over MQTT.
 type Command struct {
 	LockID  string
@@ -61,6 +75,7 @@ type Client struct {
 	log      *slog.Logger
 	mc       paho.Client
 	commands chan Command
+	webhooks chan CloudWebhook
 	now      func() time.Time
 
 	mu        sync.Mutex
@@ -80,7 +95,7 @@ type Client struct {
 const publishTimeout = 5 * time.Second
 
 func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
-	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), now: cfg.Now,
+	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), webhooks: make(chan CloudWebhook, 16), now: cfg.Now,
 		locks: map[string]LockInfo{}, states: map[string][]byte{}, cmdStatus: map[string][]byte{}, avail: map[string]string{}}
 	if c.now == nil {
 		c.now = time.Now
@@ -139,6 +154,9 @@ func (c *Client) DisconnectedFor() time.Duration {
 }
 
 func (c *Client) Commands() <-chan Command { return c.commands }
+
+// CloudWebhooks delivers relayed cloud webhook bodies (ClientConfig.CloudWebhooks).
+func (c *Client) CloudWebhooks() <-chan CloudWebhook { return c.webhooks }
 
 // SetLocks sets the published locks. removed lists lock ids whose retained
 // topics (discovery, state, availability) must be cleared; removals accumulate
@@ -236,10 +254,14 @@ func (c *Client) publish(topic string, retain bool, payload []byte) error {
 func (c *Client) onConnect() {
 	t := c.cfg.Topics
 	c.log.Info("connected to MQTT broker", "url", RedactURL(c.cfg.URL))
-	if err := c.publish(t.Status(), true, []byte("online")); err != nil {
-		c.log.Warn("publishing gateway status failed", "err", err)
-	}
+	// Subscribe before publishing anything: paho runs this handler before it
+	// resumes its message store on a reconnect, and a QoS 1 publish made in
+	// that window races with the resume (paho v1.5.1). The subscription round
+	// trips let the resume finish first.
 	c.waitSubscribe(t.CommandWildcard(), c.mc.Subscribe(t.CommandWildcard(), 1, c.onCommand))
+	if c.cfg.CloudWebhooks {
+		c.waitSubscribe(t.CloudWebhookWildcard(), c.mc.Subscribe(t.CloudWebhookWildcard(), 1, c.onCloudWebhook))
+	}
 	if d := c.cfg.Discovery; d != nil {
 		c.waitSubscribe(d.BirthTopic(), c.mc.Subscribe(d.BirthTopic(), 1, func(_ paho.Client, m paho.Message) {
 			if string(m.Payload()) == "online" {
@@ -247,6 +269,9 @@ func (c *Client) onConnect() {
 				go c.publishDiscovery()
 			}
 		}))
+	}
+	if err := c.publish(t.Status(), true, []byte("online")); err != nil {
+		c.log.Warn("publishing gateway status failed", "err", err)
 	}
 	c.publishDiscovery()
 	c.retainMu.Lock()
@@ -337,14 +362,7 @@ func (c *Client) onCommand(_ paho.Client, m paho.Message) {
 		c.log.Warn("retained command ignored; publish commands without the retain flag", "topic", m.Topic())
 		return
 	}
-	parts := strings.Split(m.Topic(), "/")
-	if len(parts) < 2 {
-		return
-	}
-	tid := parts[len(parts)-2]
-	c.mu.Lock()
-	l, ok := c.locks[tid]
-	c.mu.Unlock()
+	l, ok := c.lockForTopic(m.Topic())
 	if !ok {
 		c.log.Warn("command for unknown lock ignored", "topic", m.Topic())
 		return
@@ -358,5 +376,39 @@ func (c *Client) onCommand(_ paho.Client, m paho.Message) {
 	case c.commands <- Command{LockID: l.ID, Command: cmd, ID: id, At: c.now()}:
 	default:
 		c.log.Warn("command queue full; command dropped", "lock_id", l.ID, "command", cmd)
+	}
+}
+
+// lockForTopic returns the lock addressed by <base>/<topic id>/<leaf>.
+func (c *Client) lockForTopic(topic string) (LockInfo, bool) {
+	parts := strings.Split(topic, "/")
+	if len(parts) < 2 {
+		return LockInfo{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	l, ok := c.locks[parts[len(parts)-2]]
+	return l, ok
+}
+
+func (c *Client) onCloudWebhook(_ paho.Client, m paho.Message) {
+	if m.Retained() {
+		// A retained body would be replayed as a new event on every reconnect.
+		c.log.Warn("retained cloud webhook ignored; publish cloud webhooks without the retain flag", "topic", m.Topic())
+		return
+	}
+	l, ok := c.lockForTopic(m.Topic())
+	if !ok {
+		c.log.Warn("cloud webhook for unknown lock ignored", "topic", m.Topic())
+		return
+	}
+	if n := len(m.Payload()); n > maxCloudWebhook {
+		c.log.Warn("oversized cloud webhook dropped", "lock_id", l.ID, "size", n)
+		return
+	}
+	select {
+	case c.webhooks <- CloudWebhook{LockID: l.ID, Body: bytes.Clone(m.Payload())}:
+	default:
+		c.log.Warn("cloud webhook queue full; webhook dropped", "lock_id", l.ID)
 	}
 }

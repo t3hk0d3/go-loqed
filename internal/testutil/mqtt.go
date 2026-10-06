@@ -128,3 +128,14 @@ func (s *Subscriber) Publish(t *testing.T, topic, payload string, retained bool)
 func Topic(topic string) func(Message) bool {
 	return func(m Message) bool { return m.Topic == topic }
 }
+
+// Kick connects briefly with clientID. The broker then drops the existing
+// client with that id (session takeover), so it has to reconnect.
+func Kick(t *testing.T, url, clientID string) {
+	t.Helper()
+	c := mqtt.NewClient(mqtt.NewClientOptions().AddBroker(url).SetClientID(clientID).SetCleanSession(true))
+	if tok := c.Connect(); !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("kick connect: %v", tok.Error())
+	}
+	c.Disconnect(0)
+}
