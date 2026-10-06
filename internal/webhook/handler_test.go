@@ -150,7 +150,7 @@ func TestCloudWebhook(t *testing.T) {
 	if code := post(h, "/cloud/"+secret+"/lock1", body, nil); code != 200 || len(sink.cloudEvents) != 1 || sink.cloudLocks[0] != "lock1" {
 		t.Fatalf("code %d events %d", code, len(sink.cloudEvents))
 	}
-	if code := post(h, "/cloud/"+secret+"/lock1", `{"lock_id":"6148","online":1}`, nil); code != 200 {
+	if code := post(h, "/cloud/"+secret+"/lock1", `{"lock_id":6148,"online":1}`, nil); code != 200 {
 		t.Fatalf("same numeric id: %d", code)
 	}
 	if code := post(h, "/cloud/wrong-secret-0000000000000000/lock1", body, nil); code != 404 {
@@ -175,7 +175,7 @@ func TestCloudWebhookForAnotherLockIsRejected(t *testing.T) {
 	sink := &fakeSink{boundID: "6148"}
 	h := webhook.NewHandler(webhook.Options{Sink: sink, CloudSecret: secret, Now: func() time.Time { return now },
 		Log: slog.New(slog.NewTextHandler(&buf, nil))})
-	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":"7001","key_account_email":"jane@example.com"}`
+	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":7001,"key_account_email":"jane@example.com"}`
 	if code := post(h, "/cloud/"+secret+"/lock1", body, nil); code != 409 {
 		t.Fatalf("code %d", code)
 	}
@@ -237,7 +237,7 @@ func TestRejectedCloudWebhooksAreLoggedWithoutSecret(t *testing.T) {
 	var buf bytes.Buffer
 	h := webhook.NewHandler(webhook.Options{Sink: &fakeSink{}, CloudSecret: secret, Now: func() time.Time { return now },
 		Log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
-	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":"6148"}`
+	body := `{"event_type":"STATE_CHANGED_LATCH","lock_id":6148}`
 	wrong := "wrong-secret-0000000000000000000"
 	post(h, "/cloud/"+wrong+"/lock1", body, nil)
 	post(h, "/cloud/"+secret+"/other", body, nil)
