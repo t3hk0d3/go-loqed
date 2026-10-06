@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -217,5 +219,88 @@ func TestPollingResumesWhenCloudWebhooksStop(t *testing.T) {
 	h.advance(2 * time.Minute)
 	if len(h.cloud.calls) == calls {
 		t.Fatal("no poll within CloudPoll after cloud webhooks stopped")
+	}
+}
+
+// commandFailoverHarness: the bridge is unreachable and two HTTP failures
+// are already counted, so the next command's local failure is the third.
+// It records what had happened when the credential refresh ran.
+func commandFailoverHarness(t *testing.T) (h *harness, cloudCmdsAtRefresh *[]int, modeAtRefresh *[]model.Mode) {
+	cmds, modes := &[]int{}, &[]model.Mode{}
+	h = newHarness(t, testRecord(), config.LockSetting{}, func(d *Deps) {
+		orig := d.Refresh
+		d.Refresh = func(ctx context.Context, id string, r Reason) (store.LockRecord, error) {
+			*cmds = append(*cmds, len(h.cloud.commands))
+			*modes = append(*modes, h.s.mode)
+			return orig(ctx, id, r)
+		}
+	})
+	h.start()
+	h.bridge.commandErrs = unreachable(1000)
+	h.s.httpFailures = 2
+	return h, cmds, modes
+}
+
+func TestCommandFailoverRunsAfterTheCloudAttempt(t *testing.T) {
+	h, cmdsAt, modesAt := commandFailoverHarness(t)
+	h.cmd(model.CommandLock, "")
+	h.step(21 * time.Second) // past the 20 s local cutoff: the cloud command is sent
+	if len(h.cloud.commands) != 1 {
+		t.Fatalf("cloud commands %v", h.cloud.commands)
+	}
+	if len(h.refreshes) != 0 || h.s.mode != model.ModeLocal {
+		t.Fatalf("failover before the command resolved: refreshes %v mode %s", h.refreshes, h.s.mode)
+	}
+	h.run(10 * time.Second) // the cloud confirmation poll confirms it
+	if st := h.lastStatus(); st.Status != model.StatusConfirmed {
+		t.Fatalf("status %+v", st)
+	}
+	if !slices.Equal(h.refreshes, []Reason{ReasonUnreachable}) || h.s.mode != model.ModeCloud {
+		t.Fatalf("refreshes %v mode %s", h.refreshes, h.s.mode)
+	}
+	if !slices.Equal(*cmdsAt, []int{1}) || !slices.Equal(*modesAt, []model.Mode{model.ModeLocal}) {
+		t.Fatalf("at refresh: cloud commands %v modes %v", *cmdsAt, *modesAt)
+	}
+}
+
+func TestCommandBelowThresholdDoesNotFailOver(t *testing.T) {
+	h, _, _ := commandFailoverHarness(t)
+	h.s.httpFailures = 0
+	h.cmd(model.CommandLock, "")
+	h.step(31 * time.Second)
+	if len(h.cloud.commands) != 1 || len(h.refreshes) != 0 || h.s.mode != model.ModeLocal {
+		t.Fatalf("cloud %v refreshes %v mode %s", h.cloud.commands, h.refreshes, h.s.mode)
+	}
+}
+
+func TestCommandFailoverSkippedWhenAlreadyLeftLocal(t *testing.T) {
+	h, _, _ := commandFailoverHarness(t)
+	h.cmd(model.CommandLock, "")
+	h.step(21 * time.Second)
+	h.s.enterCloud(context.Background()) // something else failed over meanwhile
+	h.run(40 * time.Second)              // the command resolves (confirmed or no_confirmation)
+	if st := h.lastStatus(); st.Status != model.StatusConfirmed && st.Status != model.StatusFailed {
+		t.Fatalf("status %+v", st)
+	}
+	if len(h.refreshes) != 0 || h.s.mode != model.ModeCloud {
+		t.Fatalf("refreshes %v mode %s", h.refreshes, h.s.mode)
+	}
+}
+
+func TestQueuedCommandAfterCommandFailoverUsesCloud(t *testing.T) {
+	h, _, _ := commandFailoverHarness(t)
+	h.cmd(model.CommandLock, "")
+	h.step(21 * time.Second)
+	bridgeCalls := len(h.bridge.commands)
+	h.cmd(model.CommandUnlock, "") // waits for the in-flight LOCK
+	h.run(10 * time.Second)
+	if h.s.mode != model.ModeCloud {
+		t.Fatalf("mode %s", h.s.mode)
+	}
+	if len(h.bridge.commands) != bridgeCalls {
+		t.Fatalf("the queued command retried the bridge: %v", h.bridge.commands[bridgeCalls:])
+	}
+	if !slices.Equal(h.cloud.commands, []loqed.BoltState{loqed.BoltNightLock, loqed.BoltDayLock}) {
+		t.Fatalf("cloud commands %v", h.cloud.commands)
 	}
 }

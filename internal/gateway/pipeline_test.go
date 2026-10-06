@@ -697,12 +697,12 @@ func TestUncertainCommandOnFailoverIsStillConfirmed(t *testing.T) {
 func TestFallbackPollWithPreCommandDataKeepsMovingState(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
-	h.s.httpFailures = 2
 	h.bridge.commandErrs = unreachable(100)
 	h.cloud.locks[0].BoltState = loqed.BoltDayLock
 	h.cmd(model.CommandLock, "")
 	h.cloud.fetchedAt = h.now
 	h.step(20 * time.Second)
+	h.s.enterCloud(context.Background()) // a failover while the command is in flight
 	if h.s.mode != model.ModeCloud || h.lock() != "LOCKING" {
 		t.Fatalf("mode %s lock %s", h.s.mode, h.lock())
 	}

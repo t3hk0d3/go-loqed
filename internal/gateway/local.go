@@ -243,11 +243,17 @@ func (s *Supervisor) httpFailure(ctx context.Context, err error) {
 		}
 		return
 	}
-	s.httpFailures++
-	s.log.Debug("bridge request failed", "failures", s.httpFailures, "err", err)
-	if s.httpFailures >= s.t.FailureThreshold {
+	if s.countHTTPFailure(err) {
 		s.localUnreachable(ctx, err)
 	}
+}
+
+// countHTTPFailure counts a failed bridge HTTP request and reports whether
+// the failover threshold is reached, leaving the failover to the caller.
+func (s *Supervisor) countHTTPFailure(err error) bool {
+	s.httpFailures++
+	s.log.Debug("bridge request failed", "failures", s.httpFailures, "err", err)
+	return s.httpFailures >= s.t.FailureThreshold
 }
 
 // localUnreachable tries a credential refresh (the IP may have changed,

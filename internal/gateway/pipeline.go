@@ -45,6 +45,7 @@ type command struct {
 	cloudTried    bool
 	lastLocalErr  error
 	refreshAfter  bool // refresh the lock's credentials once it resolves
+	failoverAfter bool // its local failures reached the threshold: fail over once it resolves
 
 	from      loqed.BoltState // bolt state when the first request went out
 	written   bool            // a request may have reached the bridge or cloud
@@ -236,7 +237,9 @@ func (p *commandPipeline) attemptLocal(ctx context.Context, now time.Time, a *co
 			return false
 		}
 		s.warn("bridge did not receive the command; sending it via the cloud", "command", a.cmd, "attempts", a.localAttempts, "err", err)
-		s.httpFailure(ctx, err) // once per command, not per attempt
+		// Once per command, not per attempt. A failover waits until the
+		// command resolves: its cloud attempt comes first.
+		a.failoverAfter = s.countHTTPFailure(err)
 		return true
 	case errors.Is(err, loqed.ErrUnauthorized):
 		// The bridge rejected the signature, so nothing happened.
@@ -447,6 +450,12 @@ func (p *commandPipeline) resolved(ctx context.Context, a *command) {
 		a.refreshAfter = false
 		if !p.s.refreshAndRebuild(ctx, ReasonUnauthorized) && p.s.bridge == nil && p.s.mode == model.ModeLocal {
 			p.s.enterCloud(ctx)
+		}
+	}
+	if a.failoverAfter {
+		a.failoverAfter = false
+		if p.s.mode == model.ModeLocal {
+			p.s.localUnreachable(ctx, a.lastLocalErr)
 		}
 	}
 }
