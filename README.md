@@ -7,22 +7,21 @@
 
 ## Why loqed-mqtt instead of the built-in integration
 
-- **Works when the bridge doesn't.** If the bridge drops off Wi-Fi, state and
-  commands move to LOQED's cloud and come back to local by themselves, without
-  going over LOQED's 12-reads-per-12-hours limit that blocks accounts.
-- **Know whether the door actually locked.** The bridge says "OK" to every
-  command, even ones the lock ignores. loqed-mqtt reports a command as done
-  only when the lock confirms it, raises an event when it fails, and never
-  sends `OPEN` twice.
-- **No silent stale state.** You see when the state may be out of date, which
-  key or person last used the lock, and Wi-Fi, battery and connection details
-  the core integration doesn't expose.
-- **Set up once.** A new bridge IP or new keys are picked up automatically,
-  the access token renews itself (with email and password set), and one
-  instance covers every lock on the account.
-- **Local and independent.** Bridge events stay on your network, even with
-  Home Assistant Cloud, and any MQTT client can use the locks. The gateway
-  keeps tracking them while Home Assistant restarts.
+- **More reliable.** Careful retries and automatic cloud fallback when the
+  bridge drops off Wi-Fi, without going over LOQED's limit of 12 status reads
+  per 12 hours. You don't need retry or fallback logic in your automations.
+- **Safer commands.** A command counts as done only when the lock confirms
+  it, and `OPEN` is never sent twice. Your automations can act on a confirmed
+  result or a `command_failed` event instead of hoping the door locked.
+- **More informative.** Who or which key last used the lock, every lock
+  event, Wi-Fi and battery details, connection mode, and a flag when the
+  state may be out of date.
+- **Low maintenance.** A new bridge IP or new keys are picked up
+  automatically, the access token renews itself (with email and password
+  set), and one instance covers every lock on the account.
+- **Local and open.** Bridge events stay on your network even with Home
+  Assistant Cloud. Any MQTT client can use the locks, and the gateway keeps
+  tracking them while Home Assistant restarts.
 
 The core integration needs no MQTT broker. Use one or the other per lock:
 every extra webhook on the bridge delays events.
