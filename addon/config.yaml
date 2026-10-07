@@ -16,6 +16,11 @@ services:
 # Nesting is at most two levels (lock_settings → entry); key_names is a
 # "1=Alice,3=Bob" string.
 options:
+  # Empty defaults keep the credentials visible: Home Assistant hides
+  # options without a default under "unused optional options".
+  cloud_token: ""
+  cloud_email: ""
+  cloud_password: ""
   locks: []
   lock_settings: []
   webhook:

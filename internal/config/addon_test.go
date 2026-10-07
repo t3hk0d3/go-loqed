@@ -81,3 +81,24 @@ func sampleFor(key string) any {
 		return ""
 	}
 }
+
+// Home Assistant hides options without a default under "Show unused
+// optional configuration options"; the cloud credentials are the first
+// thing a user must set, so they need an (empty) default.
+func TestAddonShowsCloudCredentialsByDefault(t *testing.T) {
+	raw, err := os.ReadFile("../../addon/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addon struct {
+		Options map[string]any `yaml:"options"`
+	}
+	if err := yaml.Unmarshal(raw, &addon); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"cloud_token", "cloud_email", "cloud_password"} {
+		if v, ok := addon.Options[k]; !ok || v != "" {
+			t.Errorf("options.%s = %v (present %v), want an empty default", k, v, ok)
+		}
+	}
+}
