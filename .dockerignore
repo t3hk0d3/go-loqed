@@ -1,0 +1,5 @@
+.git
+.artifact
+dist
+docs
+*.md
