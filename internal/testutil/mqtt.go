@@ -33,7 +33,21 @@ func StartBroker(t *testing.T) string {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.Serve() }()
-	t.Cleanup(func() { _ = srv.Close() })
+	t.Cleanup(func() {
+		// mochi v2.7.9 can deadlock in Close when a client connects at the
+		// same moment (Clients.GetByListener re-takes its read lock while
+		// Delete waits for the write lock). Don't let that hang the run.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = srv.Close()
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Log("mqtt test broker did not close within 5 s (mochi shutdown deadlock); leaving it")
+		}
+	})
 	return "tcp://" + addr
 }
 
