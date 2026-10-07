@@ -1,5 +1,5 @@
 name: LOQED MQTT Gateway
-version: "0.1.0"
+version: "0.1.1"
 slug: loqed_mqtt
 description: Local-first LOQED smart lock gateway for MQTT and Home Assistant
 url: https://github.com/t3hk0d3/go-loqed
