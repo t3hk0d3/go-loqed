@@ -27,23 +27,90 @@
 The core integration needs no MQTT broker. Use one or the other per lock:
 every extra webhook on the bridge delays events.
 
-## Running loqed-mqtt
+## Installation
 
-Home Assistant OS: add this repository in *Settings → Add-ons → Add-on
-store → Repositories* and install **LOQED MQTT Gateway** (amd64, aarch64).
+You need:
+- a LOQED lock with a LOQED Bridge;
+- an MQTT broker;
+- a LOQED **personal access token**, created at
+  https://integrations.loqed.com/personal-access-tokens. Instead of a token,
+  you can give your LOQED email and password, and the gateway creates and
+  renews the token itself.
 
-Docker: see `docker-compose.yml` (host networking recommended). Without host
-networking the auto-detected webhook address is the container's, which the
-bridge cannot reach: set `LOQED_WEBHOOK__PRIVATE_URL` to
-`http://<docker-host-ip>:8099` and publish port 8099. The Docker
-`HEALTHCHECK` reads only environment and `/data/options.json`, so set a
-non-default listen address with `LOQED_WEBHOOK__LISTEN`.
+### Home Assistant OS (add-on)
 
-Configuration comes from `/data/options.json`, an optional YAML file
-(`--config`), and `LOQED_*` environment variables (nested keys use `__`,
-for example `LOQED_MQTT__BASE_TOPIC`), in increasing order of precedence.
-See `docs/superpowers/specs/2026-10-04-loqed-mqtt-gateway-design.md` for
-every setting.
+1. Install the **Mosquitto broker** add-on, if you don't use another broker
+   yet, and the **MQTT** integration.
+2. Add this repository to the add-on store. Use this button:
+
+   [![Add the repository to your Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Ft3hk0d3%2Fgo-loqed)
+
+   Or add it by hand. Open *Settings → Add-ons → Add-on store* (called *Apps →
+   App store* in recent releases), then choose *Repositories* in the ⋮ menu:
+
+   ![The Repositories entry in the add-on store menu](docs/img/hass-addons-repositories.png)
+
+   Paste `https://github.com/t3hk0d3/go-loqed` and choose **Add**:
+
+   ![The Add repository dialog](docs/img/hass-add-repository-dialog.png)
+
+3. Install **LOQED MQTT Gateway**. It runs on amd64 and aarch64.
+4. On the add-on's *Configuration* tab, set **Personal access token**, or your
+   LOQED email and password.
+5. Start the add-on. Each lock appears in Home Assistant as a device, through
+   MQTT discovery. The add-on's *Documentation* tab covers every option.
+
+### Docker
+
+The image `ghcr.io/t3hk0d3/loqed-mqtt` runs on amd64, arm64 and arm/v7.
+Start from `docker-compose.yml`:
+
+```yaml
+services:
+  loqed-mqtt:
+    image: ghcr.io/t3hk0d3/loqed-mqtt:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - loqed-data:/data
+    environment:
+      LOQED_CLOUD_TOKEN: "paste-your-personal-access-token"
+      # or: LOQED_CLOUD_EMAIL / LOQED_CLOUD_PASSWORD
+      LOQED_MQTT__URL: "tcp://192.168.1.10:1883"
+      LOQED_MQTT__USERNAME: "loqed"
+      LOQED_MQTT__PASSWORD: "change-me"
+volumes:
+  loqed-data:
+```
+
+Then run `docker compose up -d`. The gateway logs each lock it found.
+
+- **Networking.** Use host networking: the bridge sends its webhooks to the
+  gateway's address on port 8099. Without host networking, the address the
+  gateway detects is the container's, which the bridge cannot reach. In that
+  case, publish port 8099 and set `LOQED_WEBHOOK__PRIVATE_URL` to
+  `http://<docker-host-ip>:8099`.
+- **Health check.** The image's `HEALTHCHECK` reads only the environment and
+  `/data/options.json`. If you change the listen address, set it with
+  `LOQED_WEBHOOK__LISTEN`.
+
+### After installing
+
+If the bridge is on another network (an IoT VLAN, for example), allow
+connections from the bridge to the gateway on port 8099. Without that rule
+the gateway still works, but it reads the bridge's status every minute
+instead of receiving events, and its log warns about it.
+
+### Configuration
+
+Settings come from three places, each overriding the one before:
+1. `/data/options.json` (the add-on options);
+2. an optional YAML file (`--config`);
+3. `LOQED_*` environment variables. Nested keys use `__`, for example
+   `LOQED_MQTT__BASE_TOPIC`.
+
+The design spec, `docs/superpowers/specs/2026-10-04-loqed-mqtt-gateway-design.md`,
+lists every setting.
 
 ## MQTT topics
 
