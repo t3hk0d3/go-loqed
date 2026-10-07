@@ -1,22 +1,80 @@
 name: release
+# Run from Actions → release → Run workflow, or:
+#   gh workflow run release -f version=0.1.2
+# The released commit is the add-on version bump: it is tagged and its
+# images are built first; master moves to it last, so Home Assistant never
+# offers an add-on version whose image does not exist yet.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v, for example 0.1.2 or 0.2.0-rc1 (prerelease: no add-on bump)"
+        required: true
 permissions:
   contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: master
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: go test -race ./...
-  image:
+  prepare:
     needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - id: check
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::version must look like 1.2.3 or 1.2.3-rc1, got '$VERSION'"
+            exit 1
+          fi
+          if [[ "$VERSION" == *-* ]]; then echo prerelease=true; else echo prerelease=false; fi >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0 # tags, to refuse an existing version
+          # This job pushes the tag with the checkout's token.
+          persist-credentials: true
+      - id: tag
+        env:
+          PRERELEASE: ${{ steps.check.outputs.prerelease }}
+        run: |
+          tag="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag already exists"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ "$PRERELEASE" == false ]]; then
+            # The add-on version follows the release; prereleases never
+            # reach add-on users.
+            sed -i -E "s/^version: .*/version: \"$VERSION\"/" addon/config.yaml
+            git commit -am "addon: release $VERSION"
+          fi
+          git tag -a "$tag" -m "loqed-mqtt $VERSION"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  image:
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,6 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -45,9 +104,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ matrix.image }}
-          # {{version}} drops the "v"; latest only for non-prerelease tags.
-          tags: type=semver,pattern={{version}}
-          flavor: latest=auto
+          # {{version}} drops the "v"; latest only for a final release.
+          tags: type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+          flavor: latest=${{ needs.prepare.outputs.prerelease == 'false' }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,3 +116,40 @@ jobs:
           build-args: VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+  publish:
+    needs: [prepare, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # move master, create the release
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+          # This job pushes master with the checkout's token.
+          persist-credentials: true
+      - name: Move master to the released commit
+        if: needs.prepare.outputs.prerelease == 'false'
+        run: |
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+          if git push origin "$SHA:refs/heads/master"; then
+            exit 0
+          fi
+          # master moved while the images were built: merge the tagged
+          # commit, so master still contains exactly the released bump.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin master
+          git checkout -B master origin/master
+          git merge --no-edit "$TAG"
+          git push origin master
+      - name: Create the GitHub release
+        run: |
+          flags=(--verify-tag --title "loqed-mqtt ${TAG#v}" --generate-notes)
+          if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}"
