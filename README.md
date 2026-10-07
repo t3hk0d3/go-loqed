@@ -157,14 +157,26 @@ body for another lock is dropped with a warning.
 
 ## Releasing
 
-1. Tag `v<version>` and push the tag. CI tests, then pushes
-   `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7) and
-   `ghcr.io/t3hk0d3/loqed-mqtt-addon` (amd64, arm64). Prerelease tags
-   (`v1.2.0-rc1`) do not move `latest`.
-2. First release only: make both GHCR packages public (package settings →
-   change visibility), otherwise the Supervisor and `docker pull` fail.
-3. After the images exist, bump `version` in `addon/config.yaml` to the same
-   version and push. (Bumping first would make add-on updates fail.)
+Run the release workflow with the new version:
+
+    gh workflow run release -f version=0.1.2
+
+You can also use *Actions → release → Run workflow*. The workflow:
+
+1. runs the tests on `master`;
+2. commits the add-on version bump (`addon: release 0.1.2`), tags that
+   commit `v0.1.2`, and pushes only the tag;
+3. builds and pushes `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7) and
+   `ghcr.io/t3hk0d3/loqed-mqtt-addon` (amd64, arm64) from the tag;
+4. moves `master` to the tagged commit and creates the GitHub release.
+
+`master` changes last, so Home Assistant never offers an add-on version whose
+image does not exist yet. If `master` moved during the run, the workflow
+merges the tag into it instead.
+
+A prerelease version (`0.2.0-rc1`) is tagged without an add-on bump. Its
+images get only the version tag, so `latest` and add-on users stay on the last
+release.
 
 ## Development
 
