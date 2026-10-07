@@ -50,9 +50,10 @@ func TokenExpiry(token string) (time.Time, bool) {
 func (r *Resolver) Expiry() (time.Time, bool) {
 	tok := r.configured
 	if tok == "" {
-		r.mu.Lock()
+		// No r.mu: a mint holds it for up to the portal timeout, and every
+		// supervisor calls this when publishing. The store locks itself and
+		// configured/emailHash never change.
 		tok = r.cachedLocked()
-		r.mu.Unlock()
 	}
 	if tok == "" {
 		return time.Time{}, false

@@ -3,6 +3,8 @@ package mqtt_test
 import (
 	"encoding/json"
 	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +283,38 @@ func TestPendingRemovalsSurviveSecondSetLocks(t *testing.T) {
 		}
 	case <-time.After(wait):
 		t.Fatal("OnRemovedCleared not called")
+	}
+}
+
+// Commands must reach the gateway in publish order: OPEN then LOCK must
+// not become LOCK then OPEN (latest command wins).
+func TestCommandsKeepPublishOrder(t *testing.T) {
+	url := testutil.StartBroker(t)
+	c := startClient(t, url, fakeDiscovery{})
+	sub := testutil.Subscribe(t, url, "unused/#")
+	time.Sleep(200 * time.Millisecond) // let the client's subscription settle
+	const n = 200
+	got := make(chan []string, 1)
+	go func() {
+		var ids []string
+		for len(ids) < n {
+			select {
+			case cmd := <-c.Commands():
+				ids = append(ids, cmd.ID)
+			case <-time.After(5 * time.Second):
+				got <- ids
+				return
+			}
+		}
+		got <- ids
+	}()
+	var want []string
+	for i := range n {
+		id := strconv.Itoa(i)
+		want = append(want, id)
+		sub.Publish(t, "loqed/lock1/command", `{"command":"LOCK","id":"`+id+`"}`, false)
+	}
+	if ids := <-got; !slices.Equal(ids, want) {
+		t.Fatalf("commands out of order or lost:\n got  %v\n want %v", ids, want)
 	}
 }

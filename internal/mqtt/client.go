@@ -112,7 +112,9 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		SetConnectRetryInterval(5*time.Second).
 		SetMaxReconnectInterval(time.Minute).
 		SetKeepAlive(30*time.Second).
-		SetOrderMatters(false).
+		// In order: OPEN then LOCK must never reach the gateway as LOCK then
+		// OPEN (latest command wins). Safe because no handler blocks.
+		SetOrderMatters(true).
 		SetWill(cfg.Topics.Status(), "offline", 1, true).
 		SetOnConnectHandler(func(paho.Client) {
 			c.mu.Lock()

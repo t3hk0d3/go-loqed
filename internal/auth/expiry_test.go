@@ -164,3 +164,38 @@ func TestKeyDeletedRemintsMintedToken(t *testing.T) {
 		t.Fatalf("%q %v calls=%d", tok, err, m.calls)
 	}
 }
+
+// blockingMinter mints only when released, like a slow portal.
+type blockingMinter struct{ entered, release chan struct{} }
+
+func (m *blockingMinter) Mint(ctx context.Context) (store.MintedToken, error) {
+	close(m.entered)
+	<-m.release
+	return store.MintedToken{ID: "id", Value: "minted"}, nil
+}
+
+// Expiry runs on every supervisor's publish; it must not wait for a mint
+// that holds the resolver for up to the portal timeout.
+func TestExpiryDoesNotWaitForAMint(t *testing.T) {
+	m := &blockingMinter{entered: make(chan struct{}), release: make(chan struct{})}
+	r := auth.NewResolver("", "me@example.com", m, newStore(t), time.Now, discard)
+	minted := make(chan struct{})
+	go func() {
+		defer close(minted)
+		_, _ = r.Token(context.Background())
+	}()
+	<-m.entered
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Expiry()
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("Expiry waited for the mint")
+	}
+	close(m.release)
+	<-minted
+	<-done
+}
