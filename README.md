@@ -29,6 +29,9 @@ every extra webhook on the bridge delays events.
 
 ## Running loqed-mqtt
 
+Home Assistant OS: add this repository in *Settings → Add-ons → Add-on
+store → Repositories* and install **LOQED MQTT Gateway** (amd64, aarch64).
+
 Docker: see `docker-compose.yml` (host networking recommended). Without host
 networking the auto-detected webhook address is the container's, which the
 bridge cannot reach: set `LOQED_WEBHOOK__PRIVATE_URL` to
@@ -58,7 +61,8 @@ Retained messages on the `command` and `cloud_webhook` topics are ignored.
 
 `cloud_webhook` lets a relay, typically a Home Assistant automation with a
 Home Assistant Cloud (Nabu Casa) webhook trigger, deliver LOQED cloud
-webhooks without a reverse proxy. The topic's `<id>`
+webhooks without a reverse proxy. The add-on documentation
+(`addon/DOCS.md`, "Cloud webhooks") has the automation. The topic's `<id>`
 selects the lock, exactly like the per-lock `/cloud/<secret>/<id>` URL; a
 body for another lock is dropped with a warning.
 
@@ -87,10 +91,13 @@ body for another lock is dropped with a warning.
 ## Releasing
 
 1. Tag `v<version>` and push the tag. CI tests, then pushes
-   `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7). Prerelease tags
+   `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7) and
+   `ghcr.io/t3hk0d3/loqed-mqtt-addon` (amd64, arm64). Prerelease tags
    (`v1.2.0-rc1`) do not move `latest`.
-2. First release only: make the GHCR package public (package settings →
-   change visibility), otherwise `docker pull` fails.
+2. First release only: make both GHCR packages public (package settings →
+   change visibility), otherwise the Supervisor and `docker pull` fail.
+3. After the images exist, bump `version` in `addon/config.yaml` to the same
+   version and push. (Bumping first would make add-on updates fail.)
 
 ## Development
 
