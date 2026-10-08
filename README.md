@@ -199,7 +199,9 @@ You can also use *Actions → release → Run workflow*. The workflow:
 
 1. runs the tests on `master`;
 2. commits the release (`release: 0.1.2`): the add-on version bump, and
-   `CHANGELOG.md`'s `[Unreleased]` section moved under `[0.1.2]`. It tags
+   `CHANGELOG.md`'s `[Unreleased]` section moved under `[0.1.2]`, and the
+   released versions written to `addon/CHANGELOG.md`, which Home Assistant
+   shows when it offers the update. It tags
    that commit `v0.1.2` and pushes only the tag. An empty `[Unreleased]`
    section stops the release here;
 3. builds and pushes `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7) and

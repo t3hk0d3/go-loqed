@@ -2,7 +2,8 @@ name: release
 # Run from Actions → release → Run workflow, or:
 #   gh workflow run release -f version=0.1.2
 # The released commit bumps the add-on version and moves CHANGELOG.md's
-# [Unreleased] section under the version: it is tagged and its images are
+# [Unreleased] section under the version, writing the released versions to
+# addon/CHANGELOG.md (Home Assistant's update dialog): it is tagged and its images are
 # built first; master moves to it last, so Home Assistant never offers an
 # add-on version whose image does not exist yet. The GitHub release notes
 # are that CHANGELOG.md section.
@@ -71,6 +72,9 @@ jobs:
             # reach add-on users and leave CHANGELOG.md alone. Fails, before
             # anything is tagged, when [Unreleased] is empty.
             python3 .github/scripts/changelog.py release "$VERSION" "$(date -u +%F)"
+            # Home Assistant shows the add-on folder's CHANGELOG.md on update:
+            # the released versions, without [Unreleased].
+            python3 .github/scripts/changelog.py addon
             sed -i -E "s/^version: .*/version: \"$VERSION\"/" addon/config.yaml
             git commit -am "release: $VERSION"
           fi
