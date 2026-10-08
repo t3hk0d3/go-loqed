@@ -88,6 +88,9 @@ type MQTT struct {
 	BaseTopic string `yaml:"base_topic"`
 	// CloudWebhooks accepts cloud webhook bodies on <base>/<id>/cloud_webhook.
 	CloudWebhooks bool `yaml:"cloud_webhooks"`
+	// BridgeWebhookControl accepts SetWebhooks requests on
+	// <base>/<id>/webhooks/set (spec 5.9); the list is published either way.
+	BridgeWebhookControl bool `yaml:"bridge_webhook_control"`
 }
 
 type HomeAssistant struct {

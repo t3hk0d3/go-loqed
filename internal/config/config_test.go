@@ -375,3 +375,34 @@ func TestMQTTCloudWebhooksPrecedence(t *testing.T) {
 		t.Fatal("YAML must override options.json")
 	}
 }
+
+func TestMQTTBridgeWebhookControlDefaultsOff(t *testing.T) {
+	cfg, err := config.Load(config.Sources{OptionsFile: "/nonexistent/options.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MQTT.BridgeWebhookControl {
+		t.Fatal("mqtt.bridge_webhook_control must default to false")
+	}
+}
+
+func TestMQTTBridgeWebhookControlFromEachSource(t *testing.T) {
+	for name, src := range map[string]config.Sources{
+		"options.json": {OptionsFile: write(t, "options.json", `{"mqtt":{"bridge_webhook_control":true}}`)},
+		"YAML":         {ConfigFile: write(t, "config.yaml", "mqtt:\n  bridge_webhook_control: true\n")},
+		"env":          {Environ: []string{"LOQED_MQTT__BRIDGE_WEBHOOK_CONTROL=true"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if src.OptionsFile == "" {
+				src.OptionsFile = "/nonexistent/options.json"
+			}
+			cfg, err := config.Load(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.MQTT.BridgeWebhookControl {
+				t.Fatalf("%s: bridge_webhook_control not set", name)
+			}
+		})
+	}
+}

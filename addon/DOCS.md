@@ -60,7 +60,8 @@ cloud does not provide local credentials for a lock.
   each registered address one after another. Old or unreachable entries,
   for example from earlier Home Assistant setups, delay every event and
   `/status`. The add-on log warns when the bridge has more than three other
-  webhooks.
+  webhooks. The **Bridge webhooks** sensor shows how many there are, and
+  its attributes list each one; see [Bridge webhooks](#bridge-webhooks).
 - **Revoking access.** Every personal access token gets its own key on the
   lock, and revoking or expiring the token does **not** remove that key. To
   cut the gateway off, delete its key in the LOQED app.
@@ -150,3 +151,73 @@ Things to keep in mind:
   inject lock events, so restrict it with broker ACLs, as for `command`.
   LOQED does not sign cloud webhooks, so the gateway cannot check where a
   body came from.
+
+## Bridge webhooks
+
+Each lock's bridge webhook list is published, retained, on
+`loqed/<id>/webhooks` and shown by the diagnostic **Bridge webhooks**
+sensor. It is read while the lock is connected locally: at the gateway's
+regular webhook check, when the bridge reports a different number of
+webhooks, and after every change made here. `fetched_at` shows its age.
+
+```json
+{"revision":"9f2c41d0a1b2c3d4","fetched_at":"2026-10-08T08:00:00Z","count":3,"webhooks":[
+  {"id":3,"url":"http://192.168.2.10:8123/api/webhook/abc","triggers":["all"],"gateway":false},
+  {"id":5,"url":"https://hooks.nabu.casa/xyz","triggers":["battery","online_status"],"gateway":false},
+  {"id":7,"url":"http://192.168.2.20:8099/webhook/QnZk","triggers":["all"],"gateway":true}]}
+```
+
+`gateway: true` marks the add-on's own webhook. URLs are shown in full, so
+they also end up in Home Assistant's history of the sensor.
+
+### Changing the list
+
+To remove or add webhooks without the LOQED app, turn on
+`bridge_webhook_control` under **MQTT** (off by default). There is no Home
+Assistant control for it: publish a request, **not retained**, to
+`loqed/<id>/webhooks/set`, for example with the MQTT integration's
+*Publish a packet* action:
+
+```json
+{"revision":"9f2c41d0a1b2c3d4","request_id":"cleanup-1",
+ "webhooks":[{"id":3},{"url":"http://192.168.2.11:8123/api/webhook/def","triggers":["all"]}]}
+```
+
+- `webhooks` is the **complete** list you want. Every webhook it does not
+  mention is **removed** (webhook 5 above). The add-on's own webhook is
+  always kept, whether you list it or not.
+- `{"id":3}` keeps webhook 3. `{"id":3,"triggers":[...]}` keeps it, and if
+  its triggers differ, deletes it and creates it again (it gets a new id).
+- `{"url":"...","triggers":[...]}` keeps a webhook with exactly this URL and
+  triggers, re-creates it if only the triggers differ, and adds it
+  otherwise. Without `triggers` it gets all of them.
+- Trigger names: `state_changed_open`, `state_changed_latch`,
+  `state_changed_night_lock`, `state_changed_unknown`, `state_goto_open`,
+  `state_goto_latch`, `state_goto_night_lock`, `battery`, `online_status`,
+  or `all`.
+- `revision` must be the one from the list you edited. If the list changed
+  since, nothing is changed and the result says `conflict`; the list is read
+  again, so take the new revision and try again.
+- The whole request is checked before anything changes. A mistake (an
+  unknown id, a misspelled trigger, more than 20 entries) changes nothing
+  and the result says `invalid` with what is wrong.
+- Changes need the bridge (local mode). They run one at a time and never
+  delay a lock command by more than one bridge call.
+
+The result is published, **not retained**, on `loqed/<id>/webhooks/result`,
+so only a client subscribed at that moment sees it (for example MQTT
+Explorer, or *Listen to a topic* in the MQTT integration):
+
+```json
+{"request_id":"cleanup-1","status":"ok","error":null,"detail":null,
+ "removed":[5],"added":[8],"kept":[3,7],"revision":"0c1d2e3f4a5b6c7d"}
+```
+
+`status` is `ok`, `partial` (the bridge refused a call part-way; what was
+done is listed) or `failed`. `error` is `invalid`, `conflict`, `offline`,
+`unreachable`, `no_response`, `rejected` or `unauthorized`. The webhook list
+topic always shows the bridge's real list afterwards.
+
+Anyone allowed to publish to `loqed/<id>/webhooks/set` can change where
+your lock's events go. Keep the option off unless you need it, and restrict
+the topic with broker ACLs, as for `command`.

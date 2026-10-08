@@ -5,3 +5,6 @@
 .env.local
 .env.*.local
 !.env.example
+
+# Python bytecode (.github/scripts tests)
+__pycache__/

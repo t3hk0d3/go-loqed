@@ -136,6 +136,11 @@ func (m *Manager) DeliverCommand(lockID string, c model.Command, id string, at t
 }
 
 // UpdateRecords hands refreshed credentials to the running supervisors.
+// DeliverWebhooksRequest routes a raw SetWebhooks request to its lock.
+func (m *Manager) DeliverWebhooksRequest(lockID string, body []byte) error {
+	return m.deliver(lockID, WebhooksRequestMsg{Body: body})
+}
+
 func (m *Manager) UpdateRecords(recs []store.LockRecord) {
 	for _, r := range recs {
 		// Unknown locks are not managed; a full queue only delays the

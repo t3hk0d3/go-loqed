@@ -131,8 +131,12 @@ lists every setting.
 | `loqed/<id>/command` | must not be retained | `LOCK`, `UNLOCK` or `OPEN`, or JSON `{"command":"LOCK","id":"my-id"}` |
 | `loqed/<id>/command_status` | yes | JSON status of the last command |
 | `loqed/<id>/cloud_webhook` | must not be retained | a LOQED cloud webhook body, forwarded unchanged (only with `mqtt.cloud_webhooks: true`) |
+| `loqed/<id>/webhooks` | yes | JSON list of the bridge's webhooks (`revision`, `fetched_at`, `count`, `webhooks`) |
+| `loqed/<id>/webhooks/set` | must not be retained | JSON request that replaces the bridge's webhook list (only with `mqtt.bridge_webhook_control: true`) |
+| `loqed/<id>/webhooks/result` | no | JSON result of a `webhooks/set` request |
 
-Retained messages on the `command` and `cloud_webhook` topics are ignored.
+Retained messages on the `command`, `cloud_webhook` and `webhooks/set`
+topics are ignored.
 
 `cloud_webhook` lets a relay, typically a Home Assistant automation with a
 Home Assistant Cloud (Nabu Casa) webhook trigger, deliver LOQED cloud
@@ -140,6 +144,19 @@ webhooks without a reverse proxy. The add-on documentation
 (`addon/DOCS.md`, "Cloud webhooks") has the automation. The topic's `<id>`
 selects the lock, exactly like the per-lock `/cloud/<secret>/<id>` URL; a
 body for another lock is dropped with a warning.
+
+`webhooks` shows every address the bridge calls for this lock. Each one
+delays the others, so old entries explain late events. With
+`mqtt.bridge_webhook_control: true`, a request on `webhooks/set` names the
+complete list you want, with the `revision` of the list you edited:
+
+```json
+{"revision":"9f2c41d0a1b2c3d4","webhooks":[{"id":3},{"url":"http://192.168.2.11:8123/api/webhook/def"}]}
+```
+
+Listed webhooks are kept (or added), the rest are removed, and the
+gateway's own webhook is always kept. The add-on documentation
+(`addon/DOCS.md`, "Bridge webhooks") has the details.
 
 `command_status` follows each command:
 

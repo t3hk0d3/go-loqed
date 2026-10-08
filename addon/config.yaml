@@ -32,6 +32,7 @@ options:
     password: ""
     base_topic: loqed
     cloud_webhooks: false
+    bridge_webhook_control: false
   homeassistant:
     enabled: true
     discovery_prefix: homeassistant
@@ -65,6 +66,7 @@ schema:
     password: password?
     base_topic: str?
     cloud_webhooks: bool?
+    bridge_webhook_control: bool?
   homeassistant:
     enabled: bool?
     discovery_prefix: str?

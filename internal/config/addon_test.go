@@ -67,7 +67,7 @@ func TestAddonOptionsAndSchemaMatchConfig(t *testing.T) {
 
 func sampleFor(key string) any {
 	switch key {
-	case "enabled", "event_dedup_enabled", "cloud_webhooks":
+	case "enabled", "event_dedup_enabled", "cloud_webhooks", "bridge_webhook_control":
 		return true
 	case "cloud_budget":
 		return 10

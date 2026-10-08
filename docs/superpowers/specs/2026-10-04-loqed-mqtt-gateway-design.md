@@ -1,7 +1,7 @@
 # go-loqed: LOQED library + loqed-mqtt gateway — Design
 
 Date: 2026-10-04
-Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1); revised 2026-10-06: cloud webhooks over MQTT (rev 2.2); revised 2026-10-06 after the pre-merge review (rev 2.3); revised 2026-10-08: configurable bridge webhook timestamp tolerance
+Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1); revised 2026-10-06: cloud webhooks over MQTT (rev 2.2); revised 2026-10-06 after the pre-merge review (rev 2.3); revised 2026-10-08: configurable bridge webhook timestamp tolerance; revised 2026-10-08: bridge webhooks over MQTT (rev 2.4)
 
 **Rev 2.1 (2026-10-05)** — all changes come from tests against a real LOQED Touch, bridge and account (2.5):
 - Command pipeline redesigned (5.8): latest command wins, retries only when a request provably never left, 30 s / 10 s deadlines, local-then-cloud, confirmation from webhooks, retained `command_status` topic.
@@ -23,6 +23,12 @@ Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revi
 - Bridge webhook delivery is confirmed, not assumed: until a signed bridge webhook arrives, `/status` is read every `liveness_interval`, and missing webhooks are detected and reported (5.5).
 - The other feed's copy of an event is recognized for 5 min, so a late copy cannot roll the state back (5.7).
 - A failover triggered during a command runs after the command resolves (5.5, 5.8).
+
+**Rev 2.4 (2026-10-08)** — bridge webhooks over MQTT, for troubleshooting late events:
+- Each lock's bridge webhook list (id, URL, triggers) is published, retained, on `<base>/<id>/webhooks` and shown by a diagnostic "Bridge webhooks" sensor (6.1, 6.2, 5.9). Every webhook target delays the others (2.1), so the list explains late events at a glance.
+- A `SetWebhooks` request on `<base>/<id>/webhooks/set` replaces the bridge's list: new entries are added, listed ones are kept, unlisted ones are removed (5.9). It is off unless `mqtt.bridge_webhook_control` is set (5.1), has no Home Assistant entity, and must carry the `revision` of the list it was made from, so changes are deliberate and never based on an outdated view.
+- The gateway's own webhook is always kept and cannot be added, changed or removed through the topic.
+- `bridge.Webhook` decodes the trigger flags; `bridge.ParseTriggers` and `Triggers.Names` convert between trigger names and the bitmap (4.1).
 
 ## 1. Purpose and context
 
@@ -66,7 +72,8 @@ Sources: LOQED support docs (updated June 2026), `loqedAPI` 2.1.16 (pinned by HA
   ```
   The bridge answers **every** `/to_lock` with `200 "Message resent to the lock"`, even for a wrong key; the lock verifies the signature. The response therefore proves only delivery to the bridge, never acceptance (2.5). The lock rejects commands whose timestamp is 60 s or more in the past (exact tolerance untested), so a command is re-signed for every attempt.
 - Webhook management. Headers `TIMESTAMP` (decimal unix seconds) and `HASH` (hex SHA-256), where `K = b64decode(bridge_key)` and `ts8` = timestamp as u64 BE:
-  - `GET /webhooks` — `HASH = sha256(ts8 | K)`. Returns list of `{id, url, trigger_*...}`.
+  - `GET /webhooks` — `HASH = sha256(ts8 | K)`. Returns list of `{id, url, trigger_*...}` with the same nine `trigger_*` fields as `POST`, as numbers 0/1 (V11).
+  - There is no update call: changing a webhook's triggers means delete and create, and the new registration gets a new id. `POST` does not return the new id.
   - `POST /webhooks` — body `{url, trigger_state_changed_open, trigger_state_changed_latch, trigger_state_changed_night_lock, trigger_state_changed_unknown, trigger_state_goto_open, trigger_state_goto_latch, trigger_state_goto_night_lock, trigger_battery, trigger_online_status}` (each 0/1; bit 0..8 of a flags bitmap in that order). `HASH = sha256(url | flags as u32 BE | ts8 | K)`.
   - `DELETE /webhooks/{id}` — `HASH = sha256(id as u64 BE | ts8 | K)`.
 - Incoming webhooks (bridge → gateway): `POST` with headers `TIMESTAMP`, `HASH = sha256(body | ts8 | K)`. Receiver must reject requests missing either header (HA core returns 400 since 2026-10-01) and `|now − ts|` above the tolerance (20 s by default, `webhook.bridge_timestamp_tolerance`; loqedAPI uses 10 s). The bridge calls its registered webhooks one after another, so with many of them a webhook arrives late and a 13 s delay was seen on a real bridge (2026-10-08); a stale TIMESTAMP is not only clock skew. The bridge accepts any URL, including public HTTPS (HA registers Nabu Casa cloudhook URLs on the bridge). Payload families:
@@ -124,6 +131,7 @@ Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (f
 
 - V9 (new): whether deleted key slots stay deleted across token re-mints; the exact stale-timestamp tolerance of the lock.
 - V10 (rev 2.2): the Home Assistant relay end to end: a webhook trigger reached through its Nabu Casa URL receives LOQED's JSON body as `trigger.json`; the documented action republishes it unchanged (valid JSON, numbers kept as numbers); the gateway applies the event.
+- V11 (rev 2.4): `GET /webhooks` on current firmware returns the nine `trigger_*` fields per entry, as 0/1 numbers or numeric strings, and they match the flags the webhook was created with (read-only check against the real bridge); whether the bridge limits the number of webhooks.
 
 These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged until each has a recorded outcome.
 
@@ -139,6 +147,7 @@ These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged 
 | V6 | ✅ cloud webhooks are unsigned; the path secret is the only authentication |
 | V7 | ✅ after the `remember: false` fix: no 2FA, meta CSRF, create → list → revoke → logout and re-mint all work |
 | V8 | open |
+| V11 | ✅ 2026-10-08: `GET /webhooks` returns `id` (number), `url` and all nine `trigger_*` fields as numbers 0/1 for each entry (2 entries, both created with all triggers). Partial trigger sets and a webhook count limit are not verified; tests cover both number and numeric-string values |
 
 Other findings are folded into 2.1–2.3. Not adopted for v1 but recorded: an app.loqed.com "API-Config" JSON key (`lock_id`, `lock_key_local_id`, `lock_key_key`, `backend_key`, `bridge_key`, `bridge_ip`) also works, with cloud status via `app.loqed.com/API/lock_status.php` and self-signed cloud commands via `app.loqed.com/API/lock_command.php`; it needs one key per lock, so the per-account Integrations API stays primary.
 
@@ -188,9 +197,16 @@ func New(host string, creds Credentials, opts ...Option) (*Client, error) // val
 
 func (c *Client) Status(ctx) (*Status, error)
 func (c *Client) Command(ctx, Action) error           // ActionOpen, ActionUnlock, ActionLock
-func (c *Client) ListWebhooks(ctx) ([]Webhook, error)
+func (c *Client) ListWebhooks(ctx) ([]Webhook, error) // Webhook{ID, URL, Triggers}; absent trigger fields are 0
 func (c *Client) CreateWebhook(ctx, url string, t Triggers) error // AllTriggers provided
 func (c *Client) DeleteWebhook(ctx, id int) error
+
+// Trigger names are the bridge's field names without "trigger_", in bit order:
+// state_changed_open, state_changed_latch, state_changed_night_lock,
+// state_changed_unknown, state_goto_open, state_goto_latch,
+// state_goto_night_lock, battery, online_status. "all" means AllTriggers.
+func ParseTriggers(names []string) (Triggers, error) // unknown name or empty list → error naming it; duplicates allowed
+func (t Triggers) Names() []string                   // ["all"] for AllTriggers, else the set names in bit order; bits above 8 ignored
 
 // Pure verification + decoding of an incoming webhook. ParseEvent accepts
 // |skew| ≤ MaxClockSkew (20 s); ParseEventWithin takes the tolerance, and 0
@@ -281,6 +297,7 @@ mqtt:
   client_id: loqed-mqtt
   base_topic: loqed
   cloud_webhooks: false      # accept cloud webhook bodies on <base>/<id>/cloud_webhook (6.1); counts as "cloud webhooks configured"
+  bridge_webhook_control: false  # accept SetWebhooks requests on <base>/<id>/webhooks/set (5.9); the list is published either way
 homeassistant:
   enabled: true
   discovery_prefix: homeassistant
@@ -502,6 +519,48 @@ CommandPipeline (internal/gateway)
             - keeps state_stale until a webhook or later read resolves it
 ```
 
+### 5.9 Bridge webhook list and SetWebhooks
+
+Purpose: the user can see which targets the bridge calls (each one delays events, 2.1) and can change that set deliberately. Changing it is never one tap away: there is no Home Assistant entity for it, it is off by default, and a request must name the exact list it changes.
+
+**The list.** In `local`, the supervisor reads `GET /webhooks`:
+- at every webhook registration check (5.5; this read already exists);
+- when a `/status` read reports a `webhooks_number` different from the count in the last published list (no extra requests in steady state);
+- after every SetWebhooks request, whatever its outcome, and on a `conflict`.
+
+It publishes the result, retained, on `<base>/<id>/webhooks` (6.1). Nothing is read in `cloud` or `offline`; the last published list stays, and `fetched_at` shows its age. A failed read publishes nothing and is retried at the next occasion above. Reads use the 5 s bridge timeout, and their `ErrUnreachable`/`ErrNoResponse` failures count toward the HTTP failure counter like any bridge request (5.5).
+
+Each entry is `{"id", "url", "triggers", "gateway"}`: the full URL as the bridge returns it, `triggers` from `Triggers.Names()`, and `gateway: true` for the gateway's own registration of this lock (exact URL `<private_base>/webhook/<lock-id>`, 7). Entries are sorted by `id`.
+
+`revision` identifies the list: the first 16 hex characters of `sha256` over the entries in `id` order (`id`, full URL, trigger bitmap, each length-prefixed). It changes whenever any webhook is added, removed or re-created.
+
+**SetWebhooks.** Only when `mqtt.bridge_webhook_control` is true does the gateway subscribe to `<base>/+/webhooks/set`. A request (6.1) carries `revision`, `webhooks` (the complete desired list, the gateway's own may be left out) and an optional `request_id` (up to 64 printable characters, echoed back). Each entry of `webhooks` is one of:
+- `{"id": N}` — keep webhook N as it is;
+- `{"id": N, "triggers": [...]}` — keep webhook N; if its triggers differ, re-create it with these triggers (delete, then create; it gets a new id);
+- `{"url": "...", "triggers": [...]}` — keep the webhook with exactly this URL and these triggers if it exists; if the URL exists with other triggers, re-create it; otherwise add it. `triggers` defaults to `["all"]`.
+
+Webhooks on the bridge that no entry refers to are removed. The gateway's own webhook is always kept: listing it (by id, or by its URL with all triggers) is allowed and changes nothing, also when it is not registered at the moment (registration stays with 5.5).
+
+Validation runs on the whole request before any bridge write; any failure ends it as `failed` / `invalid` with a `detail` naming the entry (never the URL), and nothing changes. The checks that need the current list (ids, URLs of kept webhooks, the gateway's own webhook) run after the `revision` check below, so they always apply to the list the client saw:
+- payload over 16 KiB, not a JSON object, missing `revision`, or `webhooks` missing or longer than 20 entries;
+- an entry with both or neither of `id` and `url`, or other keys;
+- an `id` not in the current list, or listed twice; a URL listed twice, or matching a kept webhook's URL;
+- a URL that is not absolute `http`/`https` with a host, or is longer than 1024 bytes;
+- a URL whose path is `/webhook/<this lock's id>` that is not exactly the gateway's own URL, or the gateway's own webhook with triggers other than `all` (the gateway manages its registration, 5.5);
+- an unknown trigger name or an empty `triggers` list.
+
+Then, in this order:
+1. The lock must be in `local` with a bridge client; otherwise `failed` / `offline`.
+2. `revision` must equal the current list's revision; otherwise `failed` / `conflict`, and the list is read again and republished so the client can retry with the new revision; the result carries that revision only if the read worked. The comparison uses the last list read by the supervisor; a request never forces a read before the check.
+3. Deletions (unlisted webhooks, then the delete half of each re-creation) in `id` order, then creations in request order, one bridge call at a time with the 5 s timeout. The first failing call stops the request: `partial` if some call succeeded, else `failed`, with `error` = that call's class (`unreachable`, `no_response`, `rejected`, `unauthorized`). A deleted webhook whose re-creation did not run is reported in `removed`.
+4. The list is read again and published; the result carries the new `revision` (absent if that read failed).
+
+A request with nothing to change ends `ok` without bridge writes. Requests are handled by the lock's supervisor goroutine, one at a time, after a command in progress resolves; a command never waits for more than the bridge call that is running. A request queued behind another fails with `conflict` if the first one changed the list. At most 4 requests wait; a further one fails at once with `conflict` ("too many queued requests"). A request that cannot be handed to its lock at all (its message queue is full) also gets a result: `failed` / `conflict` ("the lock is busy"). Retained messages and messages for an unknown `<id>` are ignored with a warning, as on `cloud_webhook` (6.1). A payload that is not a JSON object gets a `failed` / `invalid` result with `request_id` null.
+
+The result is published, not retained, on `<base>/<id>/webhooks/result`: `{"request_id", "status": "ok"|"partial"|"failed", "error", "detail", "removed": [ids], "added": [new ids], "kept": [ids], "revision"}`. New ids are matched by URL in the list read after the request; an added URL that appears more than once there is reported once. Each removal and creation is logged at info with the webhook id and the URL's scheme and host only (8).
+
+**Trust.** Anyone allowed to publish to `<base>/<id>/webhooks/set` can redirect the lock's events to any URL or remove other integrations' webhooks; anyone allowed to read `<base>/<id>/webhooks` sees every webhook URL, including Home Assistant webhook ids and Nabu Casa cloudhook URLs (which accept events from anyone who knows them). Both are within what broker access already allows (commands, `cloud_webhook`), so broker ACLs are the protection; URLs are published in full. The documentation says that the sensor's attributes, and so these URLs, are kept in Home Assistant's history.
+
 ## 6. MQTT and Home Assistant (`internal/mqtt`, `internal/mqtt/hass`)
 
 Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT. On reconnect: resubscribe, republish discovery (if enabled), availability and current state. The reconnect republish always reads the latest cached document at publish time, so it can never overwrite a newer state with an older one. Messages on the command topic with the retain flag set are ignored.
@@ -517,6 +576,9 @@ Library: `github.com/eclipse/paho.mqtt.golang` (MQTT 3.1.1), auto-reconnect, LWT
 | `<base>/<id>/command` | no (subscribe, QoS 1) | `LOCK`/`UNLOCK`/`OPEN`, or JSON `{"command":"UNLOCK","id":"<client id>"}` |
 | `<base>/<id>/command_status` | yes | JSON command status (5.8) |
 | `<base>/<id>/cloud_webhook` | no (subscribe, QoS 1; only with `mqtt.cloud_webhooks`) | a cloud webhook body as LOQED sends it (2.2), forwarded unchanged |
+| `<base>/<id>/webhooks` | yes | JSON bridge webhook list (5.9) |
+| `<base>/<id>/webhooks/set` | no (subscribe, QoS 1; only with `mqtt.bridge_webhook_control`) | JSON SetWebhooks request (5.9) |
+| `<base>/<id>/webhooks/result` | **no** | JSON SetWebhooks result (5.9) |
 
 **`cloud_webhook` input:**
 - Subscribed as `<base>/+/cloud_webhook` after every (re)connect, only when `mqtt.cloud_webhooks` is true.
@@ -534,6 +596,22 @@ State document:
  "last_event_at":"2026-10-04T12:00:00Z","state_stale":false,"token_expires_at":"2027-04-05T19:15:26Z"}
 ```
 
+Bridge webhook list and SetWebhooks (5.9):
+```json
+{"revision":"9f2c41d0a1b2c3d4","fetched_at":"2026-10-08T08:00:00Z","count":3,"webhooks":[
+  {"id":3,"url":"http://192.168.2.10:8123/api/webhook/abc","triggers":["all"],"gateway":false},
+  {"id":5,"url":"https://hooks.nabu.casa/xyz","triggers":["battery","online_status"],"gateway":false},
+  {"id":7,"url":"http://192.168.2.20:8099/webhook/QnZk","triggers":["all"],"gateway":true}]}
+```
+```json
+{"revision":"9f2c41d0a1b2c3d4","request_id":"cleanup-1",
+ "webhooks":[{"id":3},{"url":"http://192.168.2.11:8123/api/webhook/def","triggers":["all"]}]}
+```
+```json
+{"request_id":"cleanup-1","status":"ok","error":null,"detail":null,
+ "removed":[5],"added":[8],"kept":[3,7],"revision":"0c1d2e3f4a5b6c7d"}
+```
+
 These topics are published regardless of `homeassistant.enabled`, so the gateway is usable as a plain MQTT bridge.
 
 ### 6.2 Discovery
@@ -541,7 +619,7 @@ These topics are published regardless of `homeassistant.enabled`, so the gateway
 When `homeassistant.enabled`:
 - One retained device-based discovery message per lock at `<discovery_prefix>/device/loqed_<id>/config`. All entities of a lock are components of that single device, so they are grouped per lock in HA. Device: name = lock name, manufacturer `LOQED`, model = `model_name`, identifiers = `loqed_<id>`, connections = bridge Wi-Fi MAC when known.
 - Published at startup, on MQTT reconnect, and when `<discovery_prefix>/status` receives `online`.
-- Locks no longer present (removed from account or allow-list, at startup or after a runtime refresh) get an empty retained payload on their discovery, state and availability topics, removing the device. Tracking uses `published_ids` in the cache.
+- Locks no longer present (removed from account or allow-list, at startup or after a runtime refresh) get an empty retained payload on their discovery, state, availability and `webhooks` topics, removing the device. Tracking uses `published_ids` in the cache.
 - `availability_mode: all` over `<base>/status` and `<base>/<id>/availability`.
 
 Components per lock:
@@ -559,6 +637,7 @@ Components per lock:
 | Lock event | `event` | `event_types` from 5.7; reads `<base>/<id>/event` |
 | Last command | `sensor` | diagnostic, `enum` of command statuses (5.8) from `command_status`; attributes `command`, `id`, `via`, `attempts`, `error`, `updated_at` |
 | Token expires | `sensor` | diagnostic, device_class `timestamp`, from `token_expires_at` (absent when unknown) |
+| Bridge webhooks | `sensor` | diagnostic, value `count` from `<base>/<id>/webhooks`; attributes `webhooks`, `revision`, `fetched_at` (an attribute payload must be a JSON object, so the array is nested); unknown until a list is published. No entity writes webhooks. |
 
 ## 7. Webhook listener (`internal/webhook`)
 
@@ -588,7 +667,7 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **Dockerfile:** multi-stage; `CGO_ENABLED=0` static binary. Two final targets: `standalone` on `gcr.io/distroless/static-debian12:nonroot` with a `/data` directory owned by uid 65532 (so named volumes are writable), and `addon` on `gcr.io/distroless/static-debian12` (root; the Supervisor's `/data` is root-owned). Exec-form `HEALTHCHECK` runs `loqed-mqtt healthcheck`, which calls `/healthz` on the configured listen address (an unspecified host maps to 127.0.0.1). `LABEL org.opencontainers.image.source` links the package to the repo.
 - **Images:** standalone `ghcr.io/t3hk0d3/loqed-mqtt` for `linux/amd64`, `linux/arm64`, `linux/arm/v7`; add-on `ghcr.io/t3hk0d3/loqed-mqtt-addon` for `linux/amd64`, `linux/arm64`. Pushed by the manually run `release` workflow after tests pass; `latest` only for non-prerelease versions. Packages must be made public once after the first push (documented release step).
 - **docker-compose.yml:** `network_mode: host` (so auto-detected webhook URL is the real LAN IP), named volume for `/data`, env-based config.
-- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt-addon` (prebuilt; no `build.yaml`, no local build: current Supervisor no longer passes `BUILD_FROM`), `arch: [amd64, aarch64]`, `host_network: true` (so no `ports`), `services: [mqtt:need]`, persistent `/data`, options schema mirroring 5.1 with nesting depth ≤ 2 (`lock_settings` is a list of objects whose `key_names` is a `"1=Alice,3=Bob"` string; every nested key has a default; `webhook.listen` is not exposed), `cloud_token` and `cloud_password` as `password?`, no `watchdog` key (obsolete: the Supervisor watchdog uses the image `HEALTHCHECK`). Release order (automated by the `release` workflow): the add-on version bump commit is tagged and its images are built first; `master` moves to it last, so the Supervisor never sees a version without an image. Prereleases are tagged without a bump. `DOCS.md` covers token vs email/password setup, the `lock_settings`/`key_names` format, NTP requirement, best-effort events, the cloud rate limit, `private_url` when not on host networking, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering each lock's logged URL for that lock at app.loqed.com; or, without a reverse proxy, a Home Assistant automation with one webhook trigger per lock, not local-only, whose Nabu Casa URL is registered for that lock and which publishes the body unchanged and non-retained to that lock's `cloud_webhook` topic), the firewall rule needed on segmented networks (bridge → gateway webhook port) and the warning logged when bridge webhooks do not arrive (the gateway then reads `/status` every minute), removing stale webhooks from the bridge (each target delays events), deleting the gateway's key in the LOQED app to revoke its access (revoking the token is not enough), the `command_status` topic and JSON command payload, and recalibrating the lock if UNLOCK opens the door.
+- **Add-on (`addon/`):** `config.yaml` with `image: ghcr.io/t3hk0d3/loqed-mqtt-addon` (prebuilt; no `build.yaml`, no local build: current Supervisor no longer passes `BUILD_FROM`), `arch: [amd64, aarch64]`, `host_network: true` (so no `ports`), `services: [mqtt:need]`, persistent `/data`, options schema mirroring 5.1 with nesting depth ≤ 2 (`lock_settings` is a list of objects whose `key_names` is a `"1=Alice,3=Bob"` string; every nested key has a default; `webhook.listen` is not exposed), `cloud_token` and `cloud_password` as `password?`, no `watchdog` key (obsolete: the Supervisor watchdog uses the image `HEALTHCHECK`). Release order (automated by the `release` workflow): the add-on version bump commit is tagged and its images are built first; `master` moves to it last, so the Supervisor never sees a version without an image. Prereleases are tagged without a bump. `DOCS.md` covers token vs email/password setup, the `lock_settings`/`key_names` format, NTP requirement, best-effort events, the cloud rate limit, `private_url` when not on host networking, and optional cloud webhooks (reverse proxy exposing only `/cloud/`, registering each lock's logged URL for that lock at app.loqed.com; or, without a reverse proxy, a Home Assistant automation with one webhook trigger per lock, not local-only, whose Nabu Casa URL is registered for that lock and which publishes the body unchanged and non-retained to that lock's `cloud_webhook` topic), the firewall rule needed on segmented networks (bridge → gateway webhook port) and the warning logged when bridge webhooks do not arrive (the gateway then reads `/status` every minute), removing stale webhooks from the bridge (each target delays events) with the "Bridge webhooks" sensor and a SetWebhooks example (`mqtt.bridge_webhook_control`, revision, keep by id, what is removed, that results are only seen by a subscribed client, and that URLs are kept in HA history), deleting the gateway's key in the LOQED app to revoke its access (revoking the token is not enough), the `command_status` topic and JSON command payload, and recalibrating the lock if UNLOCK opens the door.
 
 ## 10. Testing
 
@@ -598,6 +677,7 @@ Requires accurate host time (NTP) for bridge webhooks; documented.
 - **gateway:** state-machine tests with fake bridge/cloud interfaces and an injectable clock: local→cloud→offline→local, IP-change refresh, auth-error refresh, command fallback to cloud **only** on `ErrUnreachable` (never on `ErrNoResponse`), command deadline, stale-command drop, missed-webhook `/status` fallback, lost `STATE_CHANGED` after `GO_TO_STATE`, TCP-up/HTTP-hung bridge fails over, nil bridge client never used, unknown-state recovery limit, budget exhaustion, budget persistence across restart, refresh backoff under a flapping bridge, confirmation poll ignores pre-command cached data, 429 backoff, cloud-only locks, cloud probe-based offline detection and 5 min recovery, token minting and re-mint on 401, cloud-webhook push in `cloud` mode, cloud→bridge event enrichment and 30 s matching window in `local` mode, a late cross-feed copy inside the 5 min pairing window, unconfirmed webhook delivery (1-minute `/status`, warning on a missed change or a command confirmed without bridge webhooks, back to `reconcile_interval` after a bridge webhook), a bridge that hangs on connect during `OPEN` (cloud attempt still runs before the deadline), a failover triggered by a command running after that command. At least one test runs the supervisor against the real `CloudHub` + `Budget` (only the HTTP API faked).
 - **store:** atomic write, `0600`, token-hash mismatch, corrupt file handling, minted token and generated secret persistence.
 - **app:** an unwritable cache exits non-zero at startup without any cloud or portal request.
+- **bridge webhooks (rev 2.4):** `ParseTriggers`/`Names` round trip for every name and `all`; `ListWebhooks` decodes trigger flags (numbers and numeric strings, absent fields). Supervisor tests with a fake bridge: list published on registration and on a `webhooks_number` mismatch; each validation failure leaves the bridge untouched; `conflict` re-reads; `offline` outside `local`; keep by id, keep by URL, re-create on changed triggers, add, remove; the gateway's own webhook is never deleted or re-created; a failing call mid-request gives `partial` with what was done and a republished list; a request waits for a command in progress. MQTT tests: no `set` subscription without `mqtt.bridge_webhook_control`, retained `set` ignored. One app-level test through the fake bridge and broker: set → bridge changed → list republished → result.
 - **mqtt / hass:** golden JSON for discovery (in `hass`) and state documents; mapping tables for state and event normalization; `homeassistant.enabled=false` publishes no discovery; retained command messages are ignored; `cloud_webhook` messages reach the gateway only when enabled and not retained.
 - **Integration:** run the gateway against an in-process MQTT broker (`mochi-mqtt/server`) and fake bridge/cloud servers: discovery published → command in → signed bridge call out → webhook in → state and event published.
 - **CI:** `go test -race ./...`, `golangci-lint` (pinned version, run locally in the final task too), `gofmt` check, image build, add-on config lint.

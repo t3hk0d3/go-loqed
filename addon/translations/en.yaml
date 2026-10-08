@@ -34,6 +34,9 @@ configuration:
       cloud_webhooks:
         name: Cloud webhooks over MQTT
         description: Accept LOQED cloud webhook bodies on <base_topic>/<lock>/cloud_webhook, e.g. relayed from a Home Assistant Cloud webhook. Off by default.
+      bridge_webhook_control:
+        name: Bridge webhook changes over MQTT
+        description: Accept SetWebhooks requests on <base_topic>/<lock>/webhooks/set, which add and remove webhooks on the bridge (see Documentation). The webhook list is shown either way. Off by default.
   homeassistant:
     name: Home Assistant discovery
   log_level:

@@ -42,8 +42,11 @@ const bridgeKey = "Ym9uam91ciBtb25kZQ==" // "bonjour monde"
 type fakeBridge struct {
 	mu       sync.Mutex
 	webhooks []string
-	actions  []byte // executed (validly signed) actions
-	requests int    // /to_lock calls, valid or not
+	ids      []int    // id of each webhook; positional (i+1) where missing
+	nextID   int      // last id handed out
+	writes   []string // "create <url>" / "delete <id>" in order
+	actions  []byte   // executed (validly signed) actions
+	requests int      // /to_lock calls, valid or not
 	bolt     string
 	secret   []byte // key secret the lock accepts; nil = the fake cloud's
 }
@@ -61,17 +64,41 @@ func (f *fakeBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch {
 	case r.URL.Path == "/status":
-		_, _ = fmt.Fprintf(w, `{"bolt_state":%q,"lock_online":1,"battery_percentage":80,"wifi_strength":70,"ble_strength":40}`, f.bolt)
+		_, _ = fmt.Fprintf(w, `{"bolt_state":%q,"lock_online":1,"battery_percentage":80,"wifi_strength":70,"ble_strength":40,"webhooks_number":%d}`,
+			f.bolt, len(f.webhooks))
 	case r.URL.Path == "/webhooks" && r.Method == http.MethodGet:
 		list := []map[string]any{}
 		for i, u := range f.webhooks {
-			list = append(list, map[string]any{"id": i + 1, "url": u})
+			list = append(list, map[string]any{"id": f.id(i), "url": u, "trigger_battery": 1, "trigger_online_status": 1,
+				"trigger_state_changed_open": 1, "trigger_state_changed_latch": 1, "trigger_state_changed_night_lock": 1,
+				"trigger_state_changed_unknown": 1, "trigger_state_goto_open": 1, "trigger_state_goto_latch": 1,
+				"trigger_state_goto_night_lock": 1})
 		}
 		_ = json.NewEncoder(w).Encode(list)
 	case r.URL.Path == "/webhooks" && r.Method == http.MethodPost:
 		var body struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		f.webhooks = append(f.webhooks, body.URL)
+		for len(f.ids) < len(f.webhooks) {
+			f.ids = append(f.ids, len(f.ids)+1)
+		}
+		for i := range f.webhooks {
+			f.nextID = max(f.nextID, f.id(i))
+		}
+		f.nextID++
+		f.webhooks, f.ids = append(f.webhooks, body.URL), append(f.ids, f.nextID)
+		f.writes = append(f.writes, "create "+body.URL)
+	case strings.HasPrefix(r.URL.Path, "/webhooks/") && r.Method == http.MethodDelete:
+		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/webhooks/"))
+		for i := range f.webhooks {
+			if f.id(i) == id {
+				for len(f.ids) < len(f.webhooks) {
+					f.ids = append(f.ids, len(f.ids)+1)
+				}
+				f.webhooks, f.ids = slices.Delete(f.webhooks, i, i+1), slices.Delete(f.ids, i, i+1)
+				break
+			}
+		}
+		f.writes = append(f.writes, "delete "+strconv.Itoa(id))
 	case r.URL.Path == "/to_lock":
 		f.requests++
 		raw, _ := url.QueryUnescape(strings.TrimPrefix(r.URL.RawQuery, "command_signed_base64="))
@@ -140,6 +167,14 @@ func postSignedAt(hookURL, body string, ts int64) int {
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// id is the id of webhook i (caller holds mu).
+func (f *fakeBridge) id(i int) int {
+	if i < len(f.ids) {
+		return f.ids[i]
+	}
+	return i + 1
 }
 
 func (f *fakeBridge) snapshot() ([]string, []byte) {

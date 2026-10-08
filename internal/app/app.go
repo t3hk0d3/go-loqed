@@ -22,6 +22,7 @@ import (
 	"github.com/t3hk0d3/go-loqed/internal/auth"
 	"github.com/t3hk0d3/go-loqed/internal/config"
 	"github.com/t3hk0d3/go-loqed/internal/gateway"
+	"github.com/t3hk0d3/go-loqed/internal/model"
 	"github.com/t3hk0d3/go-loqed/internal/mqtt"
 	"github.com/t3hk0d3/go-loqed/internal/mqtt/hass"
 	"github.com/t3hk0d3/go-loqed/internal/store"
@@ -141,7 +142,8 @@ func Run(ctx context.Context, o Options) error {
 	}
 	mq := mqtt.NewClient(mqtt.ClientConfig{
 		URL: cfg.MQTT.URL, Username: cfg.MQTT.Username, Password: cfg.MQTT.Password, ClientID: cfg.MQTT.ClientID,
-		Topics: topics, Discovery: discovery, CloudWebhooks: cfg.MQTT.CloudWebhooks, Now: now,
+		Topics: topics, Discovery: discovery, CloudWebhooks: cfg.MQTT.CloudWebhooks,
+		BridgeWebhookControl: cfg.MQTT.BridgeWebhookControl, Now: now,
 		OnRemovedCleared: func(ids []string) {
 			published.clearPending(ids)
 			savePublished(st, published.persistIDs(), log)
@@ -242,6 +244,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	go forwardCommands(runCtx, mq, manager, log)
 	go forwardCloudWebhooks(runCtx, mq, manager, log)
+	go forwardWebhooksRequests(runCtx, mq, manager, log)
 	go refreshByAge(runCtx, refresher, cfg.CacheMaxAge.D(), log)
 	go watchTokenExpiry(runCtx, resolver.CheckExpiry, func(ctx context.Context) {
 		// A new token comes with a new lock key: use both from now on.
@@ -278,6 +281,34 @@ func forwardCommands(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, l
 			}
 		}
 	}
+}
+
+// forwardWebhooksRequests hands SetWebhooks requests to the gateway, which
+// answers on the result topic. The body (webhook URLs) is never logged.
+func forwardWebhooksRequests(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, log *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-mq.WebhooksRequests():
+			if err := m.DeliverWebhooksRequest(r.LockID, r.Body); err != nil {
+				log.Warn("SetWebhooks request not delivered", "lock_id", r.LockID, "err", err)
+				if perr := mq.PublishWebhooksResult(r.LockID, undeliveredWebhooksResult(r.Body, err)); perr != nil {
+					log.Warn("publishing the SetWebhooks result failed", "lock_id", r.LockID, "err", perr)
+				}
+			}
+		}
+	}
+}
+
+// undeliveredWebhooksResult answers a request that never reached its lock,
+// so the client is not left waiting for a result.
+func undeliveredWebhooksResult(body []byte, err error) model.WebhooksResult {
+	class, detail := model.WebhooksErrOffline, "the lock is not available"
+	if errors.Is(err, gateway.ErrBusy) {
+		class, detail = model.WebhooksErrConflict, "the lock is busy; retry"
+	}
+	return model.WebhooksResult{RequestID: model.WebhooksRequestID(body), Status: model.WebhooksFailed, Error: &class, Detail: &detail}
 }
 
 // cloudWebhooksConfigured: cloud webhooks can arrive over HTTP (public_url)

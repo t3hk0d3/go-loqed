@@ -57,6 +57,7 @@ func (t Triggers) bit(f Triggers) int {
 
 // Webhook is a registration returned by GET /webhooks.
 type Webhook struct {
-	ID  loqed.Int `json:"id"`
-	URL string    `json:"url"`
+	ID       loqed.Int
+	URL      string
+	Triggers Triggers // decoded from the trigger_* flags
 }
