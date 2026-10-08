@@ -29,6 +29,9 @@ type ClientConfig struct {
 	Now       func() time.Time // clock for command timestamps; nil = time.Now
 	// CloudWebhooks subscribes to <base>/+/cloud_webhook (mqtt.cloud_webhooks).
 	CloudWebhooks bool
+	// BridgeWebhookControl subscribes to <base>/+/webhooks/set
+	// (mqtt.bridge_webhook_control).
+	BridgeWebhookControl bool
 	// OnRemovedCleared is called with the ids of removed locks whose retained
 	// topics have been cleared on the broker.
 	OnRemovedCleared func(ids []string)
@@ -62,6 +65,13 @@ type CloudWebhook struct {
 // maxCloudWebhook matches the HTTP cloud webhook body limit.
 const maxCloudWebhook = 64 << 10
 
+// WebhooksRequest is a raw SetWebhooks request for the gateway to check. Body
+// holds webhook URLs and is never logged.
+type WebhooksRequest struct {
+	LockID string // the real lock id, not the topic id
+	Body   []byte
+}
+
 // Command is a lock command received over MQTT.
 type Command struct {
 	LockID  string
@@ -76,6 +86,7 @@ type Client struct {
 	mc       paho.Client
 	commands chan Command
 	webhooks chan CloudWebhook
+	hookReqs chan WebhooksRequest
 	now      func() time.Time
 
 	mu        sync.Mutex
@@ -96,7 +107,8 @@ type Client struct {
 const publishTimeout = 5 * time.Second
 
 func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
-	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), webhooks: make(chan CloudWebhook, 16), now: cfg.Now,
+	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), webhooks: make(chan CloudWebhook, 16),
+		hookReqs: make(chan WebhooksRequest, 16), now: cfg.Now,
 		locks: map[string]LockInfo{}, states: map[string][]byte{}, cmdStatus: map[string][]byte{}, hookLists: map[string][]byte{},
 		avail: map[string]string{}}
 	if c.now == nil {
@@ -161,6 +173,9 @@ func (c *Client) Commands() <-chan Command { return c.commands }
 
 // CloudWebhooks delivers relayed cloud webhook bodies (ClientConfig.CloudWebhooks).
 func (c *Client) CloudWebhooks() <-chan CloudWebhook { return c.webhooks }
+
+// WebhooksRequests delivers SetWebhooks requests (ClientConfig.BridgeWebhookControl).
+func (c *Client) WebhooksRequests() <-chan WebhooksRequest { return c.hookReqs }
 
 // SetLocks sets the published locks. removed lists lock ids whose retained
 // topics (discovery, state, availability) must be cleared; removals accumulate
@@ -290,6 +305,9 @@ func (c *Client) onConnect() {
 	if c.cfg.CloudWebhooks {
 		c.waitSubscribe(t.CloudWebhookWildcard(), c.mc.Subscribe(t.CloudWebhookWildcard(), 1, c.onCloudWebhook))
 	}
+	if c.cfg.BridgeWebhookControl {
+		c.waitSubscribe(t.WebhooksSetWildcard(), c.mc.Subscribe(t.WebhooksSetWildcard(), 1, c.onWebhooksSet))
+	}
 	if d := c.cfg.Discovery; d != nil {
 		c.waitSubscribe(d.BirthTopic(), c.mc.Subscribe(d.BirthTopic(), 1, func(_ paho.Client, m paho.Message) {
 			if string(m.Payload()) == "online" {
@@ -394,7 +412,7 @@ func (c *Client) onCommand(_ paho.Client, m paho.Message) {
 		c.log.Warn("retained command ignored; publish commands without the retain flag", "topic", m.Topic())
 		return
 	}
-	l, ok := c.lockForTopic(m.Topic())
+	l, ok := c.lockForTopic(m.Topic(), 1)
 	if !ok {
 		c.log.Warn("command for unknown lock ignored", "topic", m.Topic())
 		return
@@ -411,15 +429,16 @@ func (c *Client) onCommand(_ paho.Client, m paho.Message) {
 	}
 }
 
-// lockForTopic returns the lock addressed by <base>/<topic id>/<leaf>.
-func (c *Client) lockForTopic(topic string) (LockInfo, bool) {
+// lockForTopic returns the lock addressed by <base>/<topic id>/<leaf>, where
+// the leaf has leafLevels topic levels.
+func (c *Client) lockForTopic(topic string, leafLevels int) (LockInfo, bool) {
 	parts := strings.Split(topic, "/")
-	if len(parts) < 2 {
+	if len(parts) < leafLevels+1 {
 		return LockInfo{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	l, ok := c.locks[parts[len(parts)-2]]
+	l, ok := c.locks[parts[len(parts)-1-leafLevels]]
 	return l, ok
 }
 
@@ -429,7 +448,7 @@ func (c *Client) onCloudWebhook(_ paho.Client, m paho.Message) {
 		c.log.Warn("retained cloud webhook ignored; publish cloud webhooks without the retain flag", "topic", m.Topic())
 		return
 	}
-	l, ok := c.lockForTopic(m.Topic())
+	l, ok := c.lockForTopic(m.Topic(), 1)
 	if !ok {
 		c.log.Warn("cloud webhook for unknown lock ignored", "topic", m.Topic())
 		return
@@ -442,5 +461,23 @@ func (c *Client) onCloudWebhook(_ paho.Client, m paho.Message) {
 	case c.webhooks <- CloudWebhook{LockID: l.ID, Body: bytes.Clone(m.Payload())}:
 	default:
 		c.log.Warn("cloud webhook queue full; webhook dropped", "lock_id", l.ID)
+	}
+}
+
+func (c *Client) onWebhooksSet(_ paho.Client, m paho.Message) {
+	if m.Retained() {
+		// A retained request would be applied again on every reconnect.
+		c.log.Warn("retained SetWebhooks request ignored; publish requests without the retain flag", "topic", m.Topic())
+		return
+	}
+	l, ok := c.lockForTopic(m.Topic(), 2)
+	if !ok {
+		c.log.Warn("SetWebhooks request for unknown lock ignored", "topic", m.Topic())
+		return
+	}
+	select {
+	case c.hookReqs <- WebhooksRequest{LockID: l.ID, Body: bytes.Clone(m.Payload())}:
+	default:
+		c.log.Warn("SetWebhooks queue full; request dropped", "lock_id", l.ID)
 	}
 }
