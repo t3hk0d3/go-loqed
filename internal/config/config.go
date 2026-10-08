@@ -75,6 +75,9 @@ type Webhook struct {
 	PrivateURL  string `yaml:"private_url"`
 	PublicURL   string `yaml:"public_url"`
 	CloudSecret string `yaml:"cloud_secret"`
+	// BridgeTimestampTolerance is the accepted age of a bridge webhook's
+	// TIMESTAMP; 0 turns the check off (not replaced by the default).
+	BridgeTimestampTolerance Duration `yaml:"bridge_timestamp_tolerance"`
 }
 
 type MQTT struct {
@@ -225,7 +228,7 @@ func Defaults() Config {
 		EventDedupEnabled: true,
 		EventDedupWindow:  Duration(10 * time.Second),
 		CloudBudget:       10,
-		Webhook:           Webhook{Listen: ":8099"},
+		Webhook:           Webhook{Listen: ":8099", BridgeTimestampTolerance: Duration(20 * time.Second)},
 		MQTT:              MQTT{ClientID: "loqed-mqtt", BaseTopic: "loqed"},
 		HomeAssistant:     HomeAssistant{Enabled: true, DiscoveryPrefix: "homeassistant"},
 		LogLevel:          "info",
@@ -296,6 +299,9 @@ func (c Config) Validate() error {
 	}
 	if c.LivenessInterval.D() < 5*time.Second {
 		add("liveness_interval must be at least 5s")
+	}
+	if d := c.Webhook.BridgeTimestampTolerance.D(); d != 0 && d < time.Second {
+		add("webhook.bridge_timestamp_tolerance must be 0 (check off) or at least 1s")
 	}
 	if c.EventDedupWindow < 0 || c.EventDedupWindow.D() > MaxEventDedupWindow {
 		add("event_dedup_window must be between 0s and 30s")

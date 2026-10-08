@@ -58,8 +58,8 @@ func TestParseEventSignatureErrors(t *testing.T) {
 		{"wrong hash", strings.Repeat("0", 64), "1700000000", fixedNow, loqed.ErrBadSignature},
 		{"wrong hash and stale", strings.Repeat("0", 64), "1700000000", fixedNow.Add(time.Hour), loqed.ErrBadSignature},
 		{"negative timestamp", goldenEventHash, "-5", fixedNow, loqed.ErrBadSignature},
-		{"too old", goldenEventHash, "1700000000", fixedNow.Add(11 * time.Second), loqed.ErrStaleTimestamp},
-		{"too new", goldenEventHash, "1700000000", fixedNow.Add(-11 * time.Second), loqed.ErrStaleTimestamp},
+		{"too old", goldenEventHash, "1700000000", fixedNow.Add(21 * time.Second), loqed.ErrStaleTimestamp},
+		{"too new", goldenEventHash, "1700000000", fixedNow.Add(-21 * time.Second), loqed.ErrStaleTimestamp},
 	}
 	for _, c := range cases {
 		_, err := bridge.ParseEvent(k, body, c.hash, c.ts, c.now)
@@ -67,9 +67,39 @@ func TestParseEventSignatureErrors(t *testing.T) {
 			t.Errorf("%s: got %v want %v", c.name, err, c.want)
 		}
 	}
-	// Whole seconds are compared, like loqedAPI: 10.9 s is still accepted.
-	if _, err := bridge.ParseEvent(k, body, goldenEventHash, "1700000000", fixedNow.Add(10900*time.Millisecond)); err != nil {
-		t.Errorf("10.9s skew should pass: %v", err)
+	// Whole seconds are compared, like loqedAPI: 20.9 s is still accepted.
+	if _, err := bridge.ParseEvent(k, body, goldenEventHash, "1700000000", fixedNow.Add(20900*time.Millisecond)); err != nil {
+		t.Errorf("20.9s skew should pass: %v", err)
+	}
+}
+
+func TestParseEventAcceptsLateDeliveryWithinDefaultTolerance(t *testing.T) {
+	// A bridge with many registered webhooks delivers to them one after
+	// another, so a webhook can arrive well after its TIMESTAMP.
+	if _, err := bridge.ParseEvent(key(t), []byte(goldenEventBody), goldenEventHash, "1700000000", fixedNow.Add(13*time.Second)); err != nil {
+		t.Fatalf("a webhook delivered 13s late should pass: %v", err)
+	}
+}
+
+func TestParseEventWithinUsesTheGivenTolerance(t *testing.T) {
+	k, body := key(t), []byte(goldenEventBody)
+	if _, err := bridge.ParseEventWithin(k, body, goldenEventHash, "1700000000", fixedNow.Add(59*time.Second), time.Minute); err != nil {
+		t.Errorf("59s within a 1m tolerance should pass: %v", err)
+	}
+	for _, d := range []time.Duration{61 * time.Second, -61 * time.Second} {
+		if _, err := bridge.ParseEventWithin(k, body, goldenEventHash, "1700000000", fixedNow.Add(d), time.Minute); !errors.Is(err, loqed.ErrStaleTimestamp) {
+			t.Errorf("%v outside a 1m tolerance: got %v", d, err)
+		}
+	}
+}
+
+func TestParseEventWithinZeroToleranceAcceptsAnyAge(t *testing.T) {
+	k, body := key(t), []byte(goldenEventBody)
+	if _, err := bridge.ParseEventWithin(k, body, goldenEventHash, "1700000000", fixedNow.Add(24*time.Hour), 0); err != nil {
+		t.Errorf("tolerance 0 should skip the timestamp check: %v", err)
+	}
+	if _, err := bridge.ParseEventWithin(k, body, strings.Repeat("0", 64), "1700000000", fixedNow, 0); !errors.Is(err, loqed.ErrBadSignature) {
+		t.Errorf("tolerance 0 must still check HASH: got %v", err)
 	}
 }
 

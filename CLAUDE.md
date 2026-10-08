@@ -64,7 +64,7 @@ addon/                       HA add-on config.yaml, DOCS.md, translations
 - The bridge answers every `/to_lock` with 200; only webhooks (`GO_TO_STATE_*` with the gateway key, then `STATE_CHANGED_*`) confirm a command. `/status` lags and is only a hint.
 - Retained messages on `<base>/<id>/command` and `<base>/<id>/cloud_webhook` are ignored (a retained `OPEN` must never unlatch the door on reconnect; a retained cloud webhook would replay an event on every reconnect).
 - LOQED blocks an account after >12 cloud calls in 12 h. The gateway's `cloud_budget` (default 10, max 12) is persisted across restarts; crash loops must not exceed it.
-- Bridge wire details: headers exactly `TIMESTAMP` / `HASH` (upper case on the wire), webhook timestamp tolerance ±10 s, command query escaping replaces only `+` and `=`. State-reached events derive bolt state from `event_type`, never `requested_state`.
+- Bridge wire details: headers exactly `TIMESTAMP` / `HASH` (upper case on the wire), webhook timestamp tolerance ±20 s by default (`webhook.bridge_timestamp_tolerance`, 0 = off; the bridge delivers late when it has many webhooks), command query escaping replaces only `+` and `=`. State-reached events derive bolt state from `event_type`, never `requested_state`.
 - HA must not show a definite state older than reality without `state_stale`.
 
 ## Secrets and real hardware

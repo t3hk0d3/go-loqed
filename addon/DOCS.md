@@ -42,7 +42,12 @@ cloud does not provide local credentials for a lock.
 ## Things to know
 
 - **Time must be correct.** The bridge signs webhooks with a timestamp that
-  must be within 10 seconds of this host's clock.
+  must be within 20 seconds of this host's clock. A bridge with many
+  registered webhooks can deliver later than that; the log then warns about
+  a stale timestamp. Raise `bridge_timestamp_tolerance` under **Webhooks**
+  (for example `60s`), or set it to `0` to turn the check off. With the
+  check off the signature is still verified, but a recorded webhook could be
+  replayed by someone on your network.
 - **Lock events are best-effort.** The bridge occasionally loses a webhook.
   Use the lock entity, not the event entity, for automations that depend on
   whether the door is locked. Failed commands produce a `command_failed`

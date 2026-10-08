@@ -101,6 +101,14 @@ connections from the bridge to the gateway on port 8099. Without that rule
 the gateway still works, but it reads the bridge's status every minute
 instead of receiving events, and its log warns about it.
 
+If the log warns that it "rejected a bridge webhook with a stale timestamp",
+the bridge delivered the webhook more than 20 s after signing it. This
+happens when the bridge has many registered webhooks, because it calls them
+one after another, or when the clocks differ. Remove old webhooks from the
+bridge, check NTP, or raise `webhook.bridge_timestamp_tolerance` (for
+example `60s`; `0` turns the check off, and a recorded webhook could then be
+replayed on your network).
+
 ### Configuration
 
 Settings come from three places, each overriding the one before:
