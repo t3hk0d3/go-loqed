@@ -58,6 +58,7 @@ func (d *Discovery) Payload(l mqtt.LockInfo) ([]byte, error) {
 		statuses[i] = string(v)
 	}
 	cmdStatus := t.CommandStatus(tid)
+	hooks := t.Webhooks(tid)
 	eventTypes := make([]string, len(model.EventTypes))
 	for i, e := range model.EventTypes {
 		eventTypes[i] = string(e)
@@ -113,6 +114,14 @@ func (d *Discovery) Payload(l mqtt.LockInfo) ([]byte, error) {
 			"device_class": "timestamp", "entity_category": "diagnostic",
 			"value_template": "{{ value_json.token_expires_at if value_json.token_expires_at is defined else None }}",
 		}),
+		// Read-only: no entity writes webhooks (SetWebhooks is MQTT only).
+		"bridge_webhooks": map[string]any{
+			"platform": "sensor", "name": "Bridge webhooks", "unique_id": uid + "_bridge_webhooks", "state_topic": hooks,
+			"value_template": "{{ value_json.count }}", "state_class": "measurement", "entity_category": "diagnostic",
+			"icon": "mdi:webhook", "json_attributes_topic": hooks,
+			"json_attributes_template": "{{ {'webhooks': value_json.webhooks, 'revision': value_json.revision, " +
+				"'fetched_at': value_json.fetched_at} | tojson }}",
+		},
 		"event": map[string]any{
 			"platform": "event", "name": "Lock event", "unique_id": uid + "_event", "state_topic": t.Event(tid), "event_types": eventTypes,
 		},

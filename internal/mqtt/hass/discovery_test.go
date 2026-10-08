@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/t3hk0d3/go-loqed/internal/model"
@@ -60,7 +61,7 @@ func TestDiscoveryPayload(t *testing.T) {
 	}
 	wantPlatforms := map[string]string{"lock": "lock", "battery": "sensor", "battery_voltage": "sensor", "wifi_signal": "sensor",
 		"ble_signal": "sensor", "lock_online": "binary_sensor", "state_stale": "binary_sensor", "connection_mode": "sensor", "last_change_reason": "sensor", "event": "event",
-		"last_command": "sensor", "token_expires": "sensor"}
+		"last_command": "sensor", "token_expires": "sensor", "bridge_webhooks": "sensor"}
 	if len(p.Components) != len(wantPlatforms) {
 		t.Fatalf("components %v", p.Components)
 	}
@@ -99,6 +100,20 @@ func TestDiscoveryPayload(t *testing.T) {
 	bleAvail, _ := p.Components["ble_signal"]["availability"].([]any)
 	if len(bleAvail) != 3 || p.Components["ble_signal"]["availability_mode"] != "all" {
 		t.Errorf("BLE sensor must be unavailable at -1: %v", p.Components["ble_signal"])
+	}
+	hooks := p.Components["bridge_webhooks"]
+	if hooks["state_topic"] != "loqed/lock1/webhooks" || hooks["value_template"] != "{{ value_json.count }}" ||
+		hooks["entity_category"] != "diagnostic" || hooks["json_attributes_topic"] != "loqed/lock1/webhooks" {
+		t.Errorf("bridge webhooks sensor: %v", hooks)
+	}
+	if tpl, _ := hooks["json_attributes_template"].(string); !strings.Contains(tpl, "value_json.webhooks") ||
+		!strings.Contains(tpl, "value_json.revision") || !strings.Contains(tpl, "value_json.fetched_at") {
+		t.Errorf("bridge webhooks attributes: %v", hooks["json_attributes_template"])
+	}
+	for id, c := range p.Components {
+		if topic, _ := c["command_topic"].(string); strings.Contains(topic, "webhooks") {
+			t.Errorf("%s writes webhooks; no entity may", id)
+		}
 	}
 	if p.Components["lock"]["retain"] != nil {
 		t.Errorf("commands must not be retained")
