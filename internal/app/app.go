@@ -141,7 +141,8 @@ func Run(ctx context.Context, o Options) error {
 	}
 	mq := mqtt.NewClient(mqtt.ClientConfig{
 		URL: cfg.MQTT.URL, Username: cfg.MQTT.Username, Password: cfg.MQTT.Password, ClientID: cfg.MQTT.ClientID,
-		Topics: topics, Discovery: discovery, CloudWebhooks: cfg.MQTT.CloudWebhooks, Now: now,
+		Topics: topics, Discovery: discovery, CloudWebhooks: cfg.MQTT.CloudWebhooks,
+		BridgeWebhookControl: cfg.MQTT.BridgeWebhookControl, Now: now,
 		OnRemovedCleared: func(ids []string) {
 			published.clearPending(ids)
 			savePublished(st, published.persistIDs(), log)
@@ -242,6 +243,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	go forwardCommands(runCtx, mq, manager, log)
 	go forwardCloudWebhooks(runCtx, mq, manager, log)
+	go forwardWebhooksRequests(runCtx, mq, manager, log)
 	go refreshByAge(runCtx, refresher, cfg.CacheMaxAge.D(), log)
 	go watchTokenExpiry(runCtx, resolver.CheckExpiry, func(ctx context.Context) {
 		// A new token comes with a new lock key: use both from now on.
@@ -275,6 +277,21 @@ func forwardCommands(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, l
 		case c := <-mq.Commands():
 			if err := m.DeliverCommand(c.LockID, c.Command, c.ID, c.At); err != nil {
 				log.Warn("command not delivered", "lock_id", c.LockID, "err", err)
+			}
+		}
+	}
+}
+
+// forwardWebhooksRequests hands SetWebhooks requests to the gateway, which
+// answers on the result topic. The body (webhook URLs) is never logged.
+func forwardWebhooksRequests(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, log *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-mq.WebhooksRequests():
+			if err := m.DeliverWebhooksRequest(r.LockID, r.Body); err != nil {
+				log.Warn("SetWebhooks request not delivered", "lock_id", r.LockID, "err", err)
 			}
 		}
 	}
