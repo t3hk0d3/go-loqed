@@ -1,9 +1,11 @@
 name: release
 # Run from Actions → release → Run workflow, or:
 #   gh workflow run release -f version=0.1.2
-# The released commit is the add-on version bump: it is tagged and its
-# images are built first; master moves to it last, so Home Assistant never
-# offers an add-on version whose image does not exist yet.
+# The released commit bumps the add-on version and moves CHANGELOG.md's
+# [Unreleased] section under the version: it is tagged and its images are
+# built first; master moves to it last, so Home Assistant never offers an
+# add-on version whose image does not exist yet. The GitHub release notes
+# are that CHANGELOG.md section.
 on:
   workflow_dispatch:
     inputs:
@@ -27,6 +29,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race ./...
+      - run: python3 .github/scripts/test_changelog.py
   prepare:
     needs: test
     runs-on: ubuntu-latest
@@ -65,9 +68,11 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [[ "$PRERELEASE" == false ]]; then
             # The add-on version follows the release; prereleases never
-            # reach add-on users.
+            # reach add-on users and leave CHANGELOG.md alone. Fails, before
+            # anything is tagged, when [Unreleased] is empty.
+            python3 .github/scripts/changelog.py release "$VERSION" "$(date -u +%F)"
             sed -i -E "s/^version: .*/version: \"$VERSION\"/" addon/config.yaml
-            git commit -am "addon: release $VERSION"
+            git commit -am "release: $VERSION"
           fi
           git tag -a "$tag" -m "loqed-mqtt $VERSION"
           git push origin "refs/tags/$tag"
@@ -150,6 +155,27 @@ jobs:
           git push origin master
       - name: Create the GitHub release
         run: |
-          flags=(--verify-tag --title "loqed-mqtt ${TAG#v}" --generate-notes)
-          if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+          # Notes: the version's CHANGELOG.md section at the tag; for a
+          # prerelease, the [Unreleased] section, or generated notes when
+          # that is empty.
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+          git show "$TAG:CHANGELOG.md" > "$RUNNER_TEMP/CHANGELOG.md"
+          version="${TAG#v}"
+          flags=(--verify-tag --title "loqed-mqtt $version")
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease)
+            notes="$(python3 .github/scripts/changelog.py notes Unreleased "$RUNNER_TEMP/CHANGELOG.md")"
+          else
+            notes="$(python3 .github/scripts/changelog.py notes "$version" "$RUNNER_TEMP/CHANGELOG.md")"
+          fi
+          images="Images: \`ghcr.io/t3hk0d3/loqed-mqtt:$version\` (amd64, arm64, arm/v7) and \`ghcr.io/t3hk0d3/loqed-mqtt-addon:$version\` (amd64, arm64)."
+          if [[ "$PRERELEASE" == true ]]; then
+            images+=" Prereleases get no \`latest\` tag and no add-on version bump."
+          fi
+          if [[ -n "$notes" ]]; then
+            printf '%s\n\n%s\n' "$notes" "$images" > "$RUNNER_TEMP/notes.md"
+            flags+=(--notes-file "$RUNNER_TEMP/notes.md")
+          else
+            flags+=(--generate-notes)
+          fi
           gh release create "$TAG" "${flags[@]}"

@@ -172,19 +172,24 @@ Run the release workflow with the new version:
 You can also use *Actions → release → Run workflow*. The workflow:
 
 1. runs the tests on `master`;
-2. commits the add-on version bump (`addon: release 0.1.2`), tags that
-   commit `v0.1.2`, and pushes only the tag;
+2. commits the release (`release: 0.1.2`): the add-on version bump, and
+   `CHANGELOG.md`'s `[Unreleased]` section moved under `[0.1.2]`. It tags
+   that commit `v0.1.2` and pushes only the tag. An empty `[Unreleased]`
+   section stops the release here;
 3. builds and pushes `ghcr.io/t3hk0d3/loqed-mqtt` (amd64, arm64, arm/v7) and
    `ghcr.io/t3hk0d3/loqed-mqtt-addon` (amd64, arm64) from the tag;
-4. moves `master` to the tagged commit and creates the GitHub release.
+4. moves `master` to the tagged commit and creates the GitHub release, with
+   the version's `CHANGELOG.md` section as its notes.
 
 `master` changes last, so Home Assistant never offers an add-on version whose
 image does not exist yet. If `master` moved during the run, the workflow
 merges the tag into it instead.
 
-A prerelease version (`0.2.0-rc1`) is tagged without an add-on bump. Its
-images get only the version tag, so `latest` and add-on users stay on the last
-release.
+Before releasing, make sure `CHANGELOG.md`'s `[Unreleased]` section lists
+the changes. A prerelease version (`0.2.0-rc1`) is tagged without an add-on
+bump and leaves `CHANGELOG.md` alone; its notes are the `[Unreleased]`
+section. Its images get only the version tag, so `latest` and add-on users
+stay on the last release.
 
 ## Development
 
