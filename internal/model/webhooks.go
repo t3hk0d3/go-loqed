@@ -146,6 +146,21 @@ func ParseWebhooksRequest(payload []byte) (WebhooksRequest, error) {
 	return req, nil
 }
 
+// WebhooksRequestID returns the request_id of a raw request, or nil if it
+// has none or it is not valid, so even a rejected request can be answered.
+func WebhooksRequestID(payload []byte) *string {
+	if len(payload) > MaxWebhooksPayload {
+		return nil
+	}
+	var msg struct {
+		RequestID *string `json:"request_id"`
+	}
+	if json.Unmarshal(payload, &msg) != nil || msg.RequestID == nil || !validClientID(*msg.RequestID) {
+		return nil
+	}
+	return msg.RequestID
+}
+
 // parseWebhookSpec returns the entry or why it is invalid.
 func parseWebhookSpec(e map[string]json.RawMessage) (WebhookSpec, string) {
 	var spec WebhookSpec

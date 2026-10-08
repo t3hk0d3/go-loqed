@@ -22,6 +22,7 @@ import (
 	"github.com/t3hk0d3/go-loqed/internal/auth"
 	"github.com/t3hk0d3/go-loqed/internal/config"
 	"github.com/t3hk0d3/go-loqed/internal/gateway"
+	"github.com/t3hk0d3/go-loqed/internal/model"
 	"github.com/t3hk0d3/go-loqed/internal/mqtt"
 	"github.com/t3hk0d3/go-loqed/internal/mqtt/hass"
 	"github.com/t3hk0d3/go-loqed/internal/store"
@@ -292,9 +293,22 @@ func forwardWebhooksRequests(ctx context.Context, mq *mqtt.Client, m *gateway.Ma
 		case r := <-mq.WebhooksRequests():
 			if err := m.DeliverWebhooksRequest(r.LockID, r.Body); err != nil {
 				log.Warn("SetWebhooks request not delivered", "lock_id", r.LockID, "err", err)
+				if perr := mq.PublishWebhooksResult(r.LockID, undeliveredWebhooksResult(r.Body, err)); perr != nil {
+					log.Warn("publishing the SetWebhooks result failed", "lock_id", r.LockID, "err", perr)
+				}
 			}
 		}
 	}
+}
+
+// undeliveredWebhooksResult answers a request that never reached its lock,
+// so the client is not left waiting for a result.
+func undeliveredWebhooksResult(body []byte, err error) model.WebhooksResult {
+	class, detail := model.WebhooksErrOffline, "the lock is not available"
+	if errors.Is(err, gateway.ErrBusy) {
+		class, detail = model.WebhooksErrConflict, "the lock is busy; retry"
+	}
+	return model.WebhooksResult{RequestID: model.WebhooksRequestID(body), Status: model.WebhooksFailed, Error: &class, Detail: &detail}
 }
 
 // cloudWebhooksConfigured: cloud webhooks can arrive over HTTP (public_url)

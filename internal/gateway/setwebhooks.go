@@ -179,16 +179,7 @@ func (s *Supervisor) onWebhooksRequest(ctx context.Context, body []byte) {
 		return
 	}
 	if len(s.hookQueue) >= maxQueuedWebhookRequests {
-		var rid *string
-		req, err := model.ParseWebhooksRequest(body)
-		var inv *model.WebhooksInvalidError
-		switch {
-		case err == nil:
-			rid = req.RequestID
-		case errors.As(err, &inv):
-			rid = inv.RequestID
-		}
-		s.webhooksResult(model.WebhooksResult{RequestID: rid, Status: model.WebhooksFailed,
+		s.webhooksResult(model.WebhooksResult{RequestID: model.WebhooksRequestID(body), Status: model.WebhooksFailed,
 			Error: model.Ptr(model.WebhooksErrConflict), Detail: model.Ptr("too many queued requests")})
 		return
 	}

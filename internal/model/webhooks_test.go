@@ -115,3 +115,19 @@ func TestWebhookListEncoding(t *testing.T) {
 		t.Fatalf("got  %s\nwant %s", b, want)
 	}
 }
+
+func TestWebhooksRequestIDFromRawRequests(t *testing.T) {
+	cases := map[string]string{
+		`{"revision":"a","request_id":"r1","webhooks":[]}`:    "r1",
+		`{"request_id":"r1","webhooks":[{"id":1,"url":"x"}]}`: "r1", // invalid otherwise, id still echoed
+		`{"revision":"a","webhooks":[]}`:                      "",
+		`not json`:                                            "",
+		`{"request_id":"a\nb"}`:                               "",
+	}
+	for body, want := range cases {
+		got := model.WebhooksRequestID([]byte(body))
+		if (got == nil) != (want == "") || (got != nil && *got != want) {
+			t.Errorf("%s: got %v, want %q", body, got, want)
+		}
+	}
+}
