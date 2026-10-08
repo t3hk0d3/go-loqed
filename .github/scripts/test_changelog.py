@@ -1,6 +1,6 @@
 import unittest
 
-from changelog import ChangelogError, release, section
+from changelog import ChangelogError, release, released, section
 
 SAMPLE = """# Changelog
 
@@ -66,12 +66,31 @@ class SectionTest(unittest.TestCase):
             section(SAMPLE, "9.9.9")
 
 
+class ReleasedTest(unittest.TestCase):
+    def test_drops_only_the_unreleased_changes(self):
+        text = released(SAMPLE)
+        self.assertIn("## [Unreleased]", text)
+        self.assertEqual(section(text, "Unreleased"), "")
+        self.assertEqual(section(text, "0.1.1"), section(SAMPLE, "0.1.1"))
+        self.assertEqual(text.split("## [0.1.1]")[1], SAMPLE.split("## [0.1.1]")[1])
+
+
 class RepositoryChangelogTest(unittest.TestCase):
     def test_the_repository_changelog_can_be_released(self):
         with open("CHANGELOG.md", encoding="utf-8") as f:
             text = f.read()
         if section(text, "Unreleased"):
             release(text, "999.0.0", "2026-01-01")
+
+    def test_the_addon_changelog_has_the_released_history(self):
+        # Home Assistant shows addon/CHANGELOG.md in the add-on's update
+        # dialog; the release workflow copies CHANGELOG.md there.
+        with open("CHANGELOG.md", encoding="utf-8") as f:
+            root = f.read()
+        with open("addon/CHANGELOG.md", encoding="utf-8") as f:
+            addon = f.read()
+        self.assertEqual(released(addon), released(root),
+                         "addon/CHANGELOG.md differs from CHANGELOG.md's released versions; never edit the copy")
 
 
 if __name__ == "__main__":

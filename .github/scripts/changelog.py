@@ -36,6 +36,14 @@ def section(text, name):
     return "\n".join(lines[start:]).strip()
 
 
+def released(text):
+    """Return text with the [Unreleased] section emptied: the released history."""
+    body = section(text, "Unreleased")
+    if not body:
+        return text
+    return text.replace("## [Unreleased]\n\n" + body + "\n", "## [Unreleased]\n", 1)
+
+
 def release(text, version, date):
     if any(HEADING.match(l) and HEADING.match(l).group(1) == version for l in text.split("\n")):
         raise ChangelogError(f"## [{version}] already exists")
