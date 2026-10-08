@@ -202,9 +202,6 @@ func (s *Supervisor) startWebhooks(ctx context.Context, body []byte) {
 		if detail != "" {
 			r.Detail = &detail
 		}
-		if class == model.WebhooksErrConflict && s.hookList != nil {
-			r.Revision = model.Ptr(s.hookList.Revision)
-		}
 		s.webhooksResult(r)
 	}
 	req, err := model.ParseWebhooksRequest(body)
@@ -220,8 +217,12 @@ func (s *Supervisor) startWebhooks(ctx context.Context, body []byte) {
 	// The checks against the list only mean something for the list the
 	// client saw, so the revision comes first.
 	if s.hookList == nil || req.Revision != s.hookList.Revision {
-		s.readWebhooks(ctx)
-		fail(req.RequestID, model.WebhooksErrConflict, "the webhook list changed; retry with the new revision")
+		r := model.WebhooksResult{RequestID: req.RequestID, Status: model.WebhooksFailed, Error: model.Ptr(model.WebhooksErrConflict),
+			Detail: model.Ptr("the webhook list changed; retry with the new revision")}
+		if s.readWebhooks(ctx) {
+			r.Revision = model.Ptr(s.hookList.Revision)
+		}
+		s.webhooksResult(r)
 		return
 	}
 	plan, err := planWebhooks(s.hooks, req, s.ownWebhookURL(), s.id)

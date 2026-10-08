@@ -541,7 +541,7 @@ Each entry is `{"id", "url", "triggers", "gateway"}`: the full URL as the bridge
 
 Webhooks on the bridge that no entry refers to are removed. The gateway's own webhook is always kept: listing it (by id, or by its URL with all triggers) is allowed and changes nothing, also when it is not registered at the moment (registration stays with 5.5).
 
-Validation runs on the whole request before any bridge call; any failure ends it as `failed` / `invalid` with a `detail` naming the entry (never the URL), and nothing changes:
+Validation runs on the whole request before any bridge write; any failure ends it as `failed` / `invalid` with a `detail` naming the entry (never the URL), and nothing changes. The checks that need the current list (ids, URLs of kept webhooks, the gateway's own webhook) run after the `revision` check below, so they always apply to the list the client saw:
 - payload over 16 KiB, not a JSON object, missing `revision`, or `webhooks` missing or longer than 20 entries;
 - an entry with both or neither of `id` and `url`, or other keys;
 - an `id` not in the current list, or listed twice; a URL listed twice, or matching a kept webhook's URL;
@@ -551,11 +551,11 @@ Validation runs on the whole request before any bridge call; any failure ends it
 
 Then, in this order:
 1. The lock must be in `local` with a bridge client; otherwise `failed` / `offline`.
-2. `revision` must equal the current list's revision; otherwise `failed` / `conflict`, and the list is read again and republished so the client can retry with the new revision. The comparison uses the last list read by the supervisor; a request never forces a read before the check.
+2. `revision` must equal the current list's revision; otherwise `failed` / `conflict`, and the list is read again and republished so the client can retry with the new revision; the result carries that revision only if the read worked. The comparison uses the last list read by the supervisor; a request never forces a read before the check.
 3. Deletions (unlisted webhooks, then the delete half of each re-creation) in `id` order, then creations in request order, one bridge call at a time with the 5 s timeout. The first failing call stops the request: `partial` if some call succeeded, else `failed`, with `error` = that call's class (`unreachable`, `no_response`, `rejected`, `unauthorized`). A deleted webhook whose re-creation did not run is reported in `removed`.
 4. The list is read again and published; the result carries the new `revision` (absent if that read failed).
 
-A request with nothing to change ends `ok` without bridge writes. Requests are handled by the lock's supervisor goroutine, one at a time, after a command in progress resolves; a command never waits for more than the bridge call that is running. A request queued behind another fails with `conflict` if the first one changed the list. Retained messages and messages for an unknown `<id>` are ignored with a warning, as on `cloud_webhook` (6.1). A payload that is not a JSON object gets a `failed` / `invalid` result with `request_id` null.
+A request with nothing to change ends `ok` without bridge writes. Requests are handled by the lock's supervisor goroutine, one at a time, after a command in progress resolves; a command never waits for more than the bridge call that is running. A request queued behind another fails with `conflict` if the first one changed the list. At most 4 requests wait; a further one fails at once with `conflict` ("too many queued requests"). Retained messages and messages for an unknown `<id>` are ignored with a warning, as on `cloud_webhook` (6.1). A payload that is not a JSON object gets a `failed` / `invalid` result with `request_id` null.
 
 The result is published, not retained, on `<base>/<id>/webhooks/result`: `{"request_id", "status": "ok"|"partial"|"failed", "error", "detail", "removed": [ids], "added": [new ids], "kept": [ids], "revision"}`. New ids are matched by URL in the list read after the request; an added URL that appears more than once there is reported once. Each removal and creation is logged at info with the webhook id and the URL's scheme and host only (8).
 

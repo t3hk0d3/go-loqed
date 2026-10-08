@@ -363,3 +363,12 @@ func TestDeliverWebhooksRequestRoutesByLock(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+func TestConflictWithAFailedReReadGivesNoRevision(t *testing.T) {
+	h := webhooksHarness(t)
+	h.bridge.listErr = loqed.ErrNoResponse
+	h.setWebhooks(`{"revision":"0000000000000000","webhooks":[{"id":3}]}`)
+	if r := h.lastResult(); errStr(r.Error) != model.WebhooksErrConflict || r.Revision != nil {
+		t.Fatalf("result %+v: a stale revision would only conflict again", r)
+	}
+}
