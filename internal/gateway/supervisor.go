@@ -189,6 +189,10 @@ type Supervisor struct {
 	hooks    []bridge.Webhook   // the bridge's webhooks behind hookList, in id order
 	hookList *model.WebhookList // last published list; nil until one was read
 
+	// SetWebhooks requests (spec 5.9): one runs at a time, a step per call.
+	hookJob   *webhookJob
+	hookQueue [][]byte // raw requests waiting behind hookJob or a command
+
 	// Bridge webhook delivery: registration only proves the gateway reaches
 	// the bridge, not the reverse (a firewall may block bridge → gateway).
 	webhookConfirmed    bool      // a signed bridge webhook arrived since the last (re-)registration
@@ -327,7 +331,11 @@ func (s *Supervisor) Run(ctx context.Context) {
 	wake.Stop()
 	defer wake.Stop()
 	for {
-		if at := s.cmds.nextWake(); !at.IsZero() {
+		at := s.cmds.nextWake()
+		if s.webhooksReady() {
+			at = s.d.Now() // the next SetWebhooks call
+		}
+		if !at.IsZero() {
 			wake.Reset(max(at.Sub(s.d.Now()), 0))
 		}
 		select {
@@ -336,9 +344,19 @@ func (s *Supervisor) Run(ctx context.Context) {
 		case <-tick.C:
 			s.tick(ctx)
 		case <-wake.C:
-			if ctx.Err() == nil {
-				s.cmds.step(ctx, s.d.Now())
+			if ctx.Err() != nil {
+				continue
 			}
+			// Queued messages first: a command must not wait behind more
+			// than the SetWebhooks call already running.
+			select {
+			case m := <-s.in:
+				s.handle(ctx, m)
+				continue
+			default:
+			}
+			s.cmds.step(ctx, s.d.Now())
+			s.stepWebhooks(ctx)
 		case m := <-s.in:
 			s.handle(ctx, m)
 		}
@@ -370,6 +388,7 @@ func (s *Supervisor) tick(ctx context.Context) {
 		s.tickOffline(ctx, now)
 	}
 	s.cmds.step(ctx, s.d.Now())
+	s.stepWebhooks(ctx)
 }
 
 func (s *Supervisor) handle(ctx context.Context, m any) {
@@ -383,6 +402,8 @@ func (s *Supervisor) handle(ctx context.Context, m any) {
 	case RecordMsg:
 		s.setRecord(m.Record)
 		s.ensureBridge()
+	case WebhooksRequestMsg:
+		s.onWebhooksRequest(ctx, m.Body)
 	}
 }
 

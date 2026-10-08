@@ -195,7 +195,7 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 			return s.mode == model.ModeLocal
 		},
 		func() bool { // webhook registration pending (the reads below cover state)
-			if s.webhookOK || now.Before(s.nextWebhookRetry) {
+			if s.webhookOK || now.Before(s.nextWebhookRetry) || s.hookJob != nil {
 				return true
 			}
 			s.nextWebhookRetry = now.Add(s.t.WebhookRetry)
@@ -242,8 +242,9 @@ func (s *Supervisor) tickLocal(ctx context.Context, now time.Time) {
 			if now.Before(s.nextReconcile) {
 				return true
 			}
-			// Re-check the webhook every time: a bridge may drop it.
-			if !s.registerWebhook(ctx) {
+			// Re-check the webhook every time: a bridge may drop it. Not
+			// while a SetWebhooks request is changing the list.
+			if s.hookJob == nil && !s.registerWebhook(ctx) {
 				return false
 			}
 			s.reconcile(ctx)
@@ -284,7 +285,7 @@ func (s *Supervisor) readStatus(ctx context.Context) bool {
 	}
 	s.applyStatus(ctx, now, st)
 	s.publish()
-	if s.webhookCountChanged(st) {
+	if s.webhookCountChanged(st) && s.hookJob == nil {
 		s.readWebhooks(ctx)
 	}
 	return true
