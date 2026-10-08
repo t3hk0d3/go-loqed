@@ -56,6 +56,7 @@ addon/                       HA add-on config.yaml, DOCS.md, translations
 - **No secrets in errors or logs:** never include tokens, passwords, keys, signed commands, URLs/query strings, headers, portal HTML, full cloud responses or cloud webhook bodies — this includes context-canceled and invalid-address errors. Cloud webhook decoding must never decode `key_name_admin`, `key_account_email`/`key_account_e-mail`, `key_account_name` or `value1..value3` (they carry the account e-mail).
 - **Logging:** `log/slog`; mode transitions at info; repeated identical warnings are rate-limited.
 - **Tests:** stdlib `testing` only, table tests against `httptest` servers, fixtures/golden files under `testdata/`. Test names read as behaviour (`TestCommandErrorDoesNotLeakSignedCommand`). Gateway tests use fake bridge/cloud interfaces and an injectable clock — no real sleeps. Integration tests use `internal/testutil` (in-process broker).
+- **Changelog:** every user-visible change adds a line under `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog: Added / Changed / Fixed / Removed), written for users, not as commit messages.
 - **Commits:** short lowercase `<area>: <what>` subject (e.g. `gateway: retry lagging confirmations`), ending with the `Co-Authored-By` trailer.
 
 ## Safety-critical invariants (do not regress)
