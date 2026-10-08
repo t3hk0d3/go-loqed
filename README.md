@@ -17,6 +17,11 @@
 - **More informative.** Who or which key last used the lock, every lock
   event, Wi-Fi and battery details, connection mode, and a flag when the
   state may be out of date.
+- **No webhook address to configure.** For each bridge, the gateway works
+  out which of its own addresses that bridge can reach, registers its
+  webhook there, and moves the registration when that address changes. It
+  keeps working across VLANs, multiple network interfaces and DHCP
+  renewals.
 - **Low maintenance.** A new bridge IP or new keys are picked up
   automatically, the access token renews itself (with email and password
   set), and one instance covers every lock on the account.
@@ -85,11 +90,15 @@ volumes:
 
 Then run `docker compose up -d`. The gateway logs each lock it found.
 
-- **Networking.** Use host networking: the bridge sends its webhooks to the
-  gateway's address on port 8099. Without host networking, the address the
-  gateway detects is the container's, which the bridge cannot reach. In that
-  case, publish port 8099 and set `LOQED_WEBHOOK__PRIVATE_URL` to
-  `http://<docker-host-ip>:8099`.
+- **Networking.** Use host networking. The bridge sends its webhooks to the
+  gateway on port 8099, and the gateway picks the address for each lock
+  itself: it asks the OS which local address the route to that lock's bridge
+  uses (a UDP connect, which sends no packets). It checks this again on every
+  registration check, and if the address changes, it replaces its own entry
+  on the bridge. Without host networking, the address it finds is the
+  container's, which the bridge cannot reach, and the log warns about it. In
+  that case (or behind NAT or a port forward), publish port 8099 and set
+  `LOQED_WEBHOOK__PRIVATE_URL` to `http://<docker-host-ip>:8099`.
 - **Health check.** The image's `HEALTHCHECK` reads only the environment and
   `/data/options.json`. If you change the listen address, set it with
   `LOQED_WEBHOOK__LISTEN`.
