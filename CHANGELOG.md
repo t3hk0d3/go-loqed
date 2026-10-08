@@ -20,6 +20,16 @@ library are listed here. The format follows
   stale bridge webhook names the setting.
 - Library: `bridge.ParseEventWithin` takes the tolerance; `bridge.MaxClockSkew`
   is now 20 s.
+- A **Bridge webhooks** diagnostic sensor and the retained
+  `loqed/<id>/webhooks` topic list every webhook the bridge calls (id, URL,
+  triggers, and which one is the gateway's own).
+- With `mqtt.bridge_webhook_control` (off by default), a request on
+  `loqed/<id>/webhooks/set` replaces the bridge's webhook list: listed ones
+  are kept or added, the rest removed. It must name the `revision` of the
+  list it was made from; the result is published on
+  `loqed/<id>/webhooks/result`.
+- Library: `bridge.Webhook` carries its `Triggers`; `bridge.ParseTriggers` and
+  `Triggers.Names` convert to and from trigger names.
 
 ## [0.1.1] - 2026-10-07
 
