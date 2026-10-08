@@ -41,6 +41,16 @@ cloud does not provide local credentials for a lock.
 
 ## Things to know
 
+- **The webhook address is found for you.** For each lock, the gateway asks
+  the operating system which of this host's addresses it would use to reach
+  that lock's bridge, and registers `http://<that address>:8099/webhook/<lock id>`
+  on the bridge. No packets are sent for this. With several networks (an IoT
+  VLAN, for example), each bridge gets the address on its own side. The
+  address is checked again on every registration check: if this host gets a
+  new IP, the old registration is removed from the bridge and the new one
+  added. Set `private_url` under **Webhooks** only if the bridge has to
+  reach the gateway through another address, such as NAT, a port forward or
+  a DNS name (for example `http://ha.lan:8099`).
 - **Time must be correct.** The bridge signs webhooks with a timestamp that
   must be within 20 seconds of this host's clock. A bridge with many
   registered webhooks can deliver later than that; the log then warns about
