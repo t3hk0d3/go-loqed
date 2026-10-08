@@ -72,7 +72,7 @@ Sources: LOQED support docs (updated June 2026), `loqedAPI` 2.1.16 (pinned by HA
   ```
   The bridge answers **every** `/to_lock` with `200 "Message resent to the lock"`, even for a wrong key; the lock verifies the signature. The response therefore proves only delivery to the bridge, never acceptance (2.5). The lock rejects commands whose timestamp is 60 s or more in the past (exact tolerance untested), so a command is re-signed for every attempt.
 - Webhook management. Headers `TIMESTAMP` (decimal unix seconds) and `HASH` (hex SHA-256), where `K = b64decode(bridge_key)` and `ts8` = timestamp as u64 BE:
-  - `GET /webhooks` — `HASH = sha256(ts8 | K)`. Returns list of `{id, url, trigger_*...}` with the same nine `trigger_*` fields as `POST` (each 0/1; V11).
+  - `GET /webhooks` — `HASH = sha256(ts8 | K)`. Returns list of `{id, url, trigger_*...}` with the same nine `trigger_*` fields as `POST`, as numbers 0/1 (V11).
   - There is no update call: changing a webhook's triggers means delete and create, and the new registration gets a new id. `POST` does not return the new id.
   - `POST /webhooks` — body `{url, trigger_state_changed_open, trigger_state_changed_latch, trigger_state_changed_night_lock, trigger_state_changed_unknown, trigger_state_goto_open, trigger_state_goto_latch, trigger_state_goto_night_lock, trigger_battery, trigger_online_status}` (each 0/1; bit 0..8 of a flags bitmap in that order). `HASH = sha256(url | flags as u32 BE | ts8 | K)`.
   - `DELETE /webhooks/{id}` — `HASH = sha256(id as u64 BE | ts8 | K)`.
@@ -147,6 +147,7 @@ These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged 
 | V6 | ✅ cloud webhooks are unsigned; the path secret is the only authentication |
 | V7 | ✅ after the `remember: false` fix: no 2FA, meta CSRF, create → list → revoke → logout and re-mint all work |
 | V8 | open |
+| V11 | ✅ 2026-10-08: `GET /webhooks` returns `id` (number), `url` and all nine `trigger_*` fields as numbers 0/1 for each entry (2 entries, both created with all triggers). Partial trigger sets and a webhook count limit are not verified; tests cover both number and numeric-string values |
 
 Other findings are folded into 2.1–2.3. Not adopted for v1 but recorded: an app.loqed.com "API-Config" JSON key (`lock_id`, `lock_key_local_id`, `lock_key_key`, `backend_key`, `bridge_key`, `bridge_ip`) also works, with cloud status via `app.loqed.com/API/lock_status.php` and self-signed cloud commands via `app.loqed.com/API/lock_command.php`; it needs one key per lock, so the per-account Integrations API stays primary.
 
