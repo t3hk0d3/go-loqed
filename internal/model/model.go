@@ -195,10 +195,16 @@ func ParseCommandMessage(payload []byte) (Command, string, error) {
 	if msg.ID == nil {
 		return c, "", nil
 	}
-	if len(*msg.ID) > MaxCommandIDLen || strings.IndexFunc(*msg.ID, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+	if !validClientID(*msg.ID) {
 		return "", "", fmt.Errorf("command id must be at most %d printable characters; %w", MaxCommandIDLen, errCommandPayload)
 	}
 	return c, *msg.ID, nil
+}
+
+// validClientID: a client id echoed back to MQTT is at most MaxCommandIDLen
+// printable characters.
+func validClientID(id string) bool {
+	return len(id) <= MaxCommandIDLen && strings.IndexFunc(id, func(r rune) bool { return !unicode.IsPrint(r) }) < 0
 }
 
 func (c Command) Target() loqed.BoltState {
