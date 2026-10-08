@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -28,6 +30,12 @@ type fakeBridge struct {
 	listCalls   int
 	created     []string
 	deleted     []int
+	createErrs  []error  // consumed per call; empty = success
+	deleteErrs  []error  // consumed per call; empty = success
+	calls       []string // "list", "create <url>", "delete <id>", "command" in order
+	nextID      int      // last id handed out by CreateWebhook (0: start at 100)
+	// webhooksNumber overrides /status webhooks_number (nil: len(hooks)).
+	webhooksNumber *int
 }
 
 func (f *fakeBridge) Status(context.Context) (*bridge.Status, error) {
@@ -36,11 +44,16 @@ func (f *fakeBridge) Status(context.Context) (*bridge.Status, error) {
 		return nil, f.statusErr
 	}
 	st := f.status
+	st.WebhooksNumber = loqed.Int(len(f.hooks))
+	if f.webhooksNumber != nil {
+		st.WebhooksNumber = loqed.Int(*f.webhooksNumber)
+	}
 	return &st, nil
 }
 
 func (f *fakeBridge) Command(ctx context.Context, a bridge.Action) error {
 	f.commands = append(f.commands, a)
+	f.calls = append(f.calls, "command")
 	if dl, ok := ctx.Deadline(); ok {
 		f.cmdBudgets = append(f.cmdBudgets, time.Until(dl))
 	}
@@ -60,17 +73,42 @@ func (f *fakeBridge) Command(ctx context.Context, a bridge.Action) error {
 
 func (f *fakeBridge) ListWebhooks(context.Context) ([]bridge.Webhook, error) {
 	f.listCalls++
-	return f.hooks, f.listErr
+	f.calls = append(f.calls, "list")
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return slices.Clone(f.hooks), nil
 }
 
-func (f *fakeBridge) CreateWebhook(_ context.Context, url string, _ bridge.Triggers) error {
+func (f *fakeBridge) CreateWebhook(_ context.Context, url string, t bridge.Triggers) error {
+	f.calls = append(f.calls, "create "+url)
+	if len(f.createErrs) > 0 {
+		err := f.createErrs[0]
+		f.createErrs = f.createErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	f.created = append(f.created, url)
-	f.hooks = append(f.hooks, bridge.Webhook{ID: loqed.Int(100 + len(f.hooks)), URL: url})
+	if f.nextID == 0 {
+		f.nextID = 99
+	}
+	f.nextID++
+	f.hooks = append(f.hooks, bridge.Webhook{ID: loqed.Int(f.nextID), URL: url, Triggers: t})
 	return nil
 }
 
 func (f *fakeBridge) DeleteWebhook(_ context.Context, id int) error {
+	f.calls = append(f.calls, "delete "+strconv.Itoa(id))
+	if len(f.deleteErrs) > 0 {
+		err := f.deleteErrs[0]
+		f.deleteErrs = f.deleteErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	f.deleted = append(f.deleted, id)
+	f.hooks = slices.DeleteFunc(f.hooks, func(h bridge.Webhook) bool { return int(h.ID) == id })
 	return nil
 }
 
@@ -111,6 +149,18 @@ type fakePub struct {
 	events   []model.Event
 	avail    []bool
 	statuses []model.CommandStatus
+	lists    []model.WebhookList
+	results  []model.WebhooksResult
+}
+
+func (f *fakePub) PublishWebhooks(_ string, l model.WebhookList) error {
+	f.lists = append(f.lists, l)
+	return nil
+}
+
+func (f *fakePub) PublishWebhooksResult(_ string, r model.WebhooksResult) error {
+	f.results = append(f.results, r)
+	return nil
 }
 
 func (f *fakePub) PublishCommandStatus(_ string, s model.CommandStatus) error {

@@ -132,7 +132,7 @@ func (s *Supervisor) ensureWebhook(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	suffix := "/webhook/" + s.id
-	found := false
+	found, deleted := false, false
 	others := 0
 	for _, h := range hooks {
 		if h.URL == want {
@@ -147,6 +147,7 @@ func (s *Supervisor) ensureWebhook(ctx context.Context) (bool, error) {
 		if err := s.bridge.DeleteWebhook(c, int(h.ID)); err != nil {
 			s.warn("could not delete a stale webhook", "webhook_id", int(h.ID), "err", err)
 		} else {
+			deleted = true
 			s.log.Info("deleted a stale webhook", "webhook_id", int(h.ID))
 		}
 	}
@@ -155,11 +156,17 @@ func (s *Supervisor) ensureWebhook(ctx context.Context) (bool, error) {
 			"other_webhooks", others)
 	}
 	if found {
+		if deleted {
+			_ = s.rereadWebhooks(ctx)
+		} else {
+			s.publishWebhooks(hooks)
+		}
 		return false, nil
 	}
 	if err := s.bridge.CreateWebhook(c, want, bridge.AllTriggers); err != nil {
 		return false, err
 	}
+	_ = s.rereadWebhooks(ctx)
 	return true, nil
 }
 
@@ -277,6 +284,9 @@ func (s *Supervisor) readStatus(ctx context.Context) bool {
 	}
 	s.applyStatus(ctx, now, st)
 	s.publish()
+	if s.webhookCountChanged(st) {
+		s.readWebhooks(ctx)
+	}
 	return true
 }
 

@@ -22,6 +22,10 @@ func (t Topics) CloudWebhookWildcard() string { return t.Base + "/+/cloud_webhoo
 func (t Topics) CommandStatus(id string) string {
 	return t.Base + "/" + id + "/command_status"
 }
+func (t Topics) Webhooks(id string) string       { return t.Base + "/" + id + "/webhooks" }
+func (t Topics) WebhooksSet(id string) string    { return t.Base + "/" + id + "/webhooks/set" }
+func (t Topics) WebhooksSetWildcard() string     { return t.Base + "/+/webhooks/set" }
+func (t Topics) WebhooksResult(id string) string { return t.Base + "/" + id + "/webhooks/result" }
 
 // TopicID makes a lock id safe for use as one MQTT topic level.
 func TopicID(lockID string) string {

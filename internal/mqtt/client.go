@@ -83,6 +83,7 @@ type Client struct {
 	removed   []string            // real lock ids
 	states    map[string][]byte   // by real lock id
 	cmdStatus map[string][]byte   // by real lock id
+	hookLists map[string][]byte   // by real lock id
 	avail     map[string]string   // by real lock id
 	downSince time.Time           // zero while connected
 
@@ -96,7 +97,8 @@ const publishTimeout = 5 * time.Second
 
 func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), webhooks: make(chan CloudWebhook, 16), now: cfg.Now,
-		locks: map[string]LockInfo{}, states: map[string][]byte{}, cmdStatus: map[string][]byte{}, avail: map[string]string{}}
+		locks: map[string]LockInfo{}, states: map[string][]byte{}, cmdStatus: map[string][]byte{}, hookLists: map[string][]byte{},
+		avail: map[string]string{}}
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -180,6 +182,7 @@ func (c *Client) SetLocks(locks []LockInfo, removed []string) {
 	for _, id := range removed {
 		delete(c.states, id)
 		delete(c.cmdStatus, id)
+		delete(c.hookLists, id)
 		delete(c.avail, id)
 	}
 	c.mu.Unlock()
@@ -213,6 +216,29 @@ func (c *Client) PublishCommandStatus(lockID string, s model.CommandStatus) erro
 	c.cmdStatus[lockID] = b
 	c.mu.Unlock()
 	return c.publish(c.cfg.Topics.CommandStatus(TopicID(lockID)), true, b)
+}
+
+// PublishWebhooks publishes the retained bridge webhook list.
+func (c *Client) PublishWebhooks(lockID string, l model.WebhookList) error {
+	b, err := json.Marshal(l)
+	if err != nil {
+		return err
+	}
+	c.retainMu.Lock()
+	defer c.retainMu.Unlock()
+	c.mu.Lock()
+	c.hookLists[lockID] = b
+	c.mu.Unlock()
+	return c.publish(c.cfg.Topics.Webhooks(TopicID(lockID)), true, b)
+}
+
+// PublishWebhooksResult publishes a SetWebhooks result (not retained).
+func (c *Client) PublishWebhooksResult(lockID string, r model.WebhooksResult) error {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return c.publish(c.cfg.Topics.WebhooksResult(TopicID(lockID)), false, b)
 }
 
 func (c *Client) PublishEvent(lockID string, e model.Event) error {
@@ -279,7 +305,7 @@ func (c *Client) onConnect() {
 	c.retainMu.Lock()
 	defer c.retainMu.Unlock()
 	c.mu.Lock()
-	states, cmdStatus, avail := maps.Clone(c.states), maps.Clone(c.cmdStatus), maps.Clone(c.avail)
+	states, cmdStatus, hookLists, avail := maps.Clone(c.states), maps.Clone(c.cmdStatus), maps.Clone(c.hookLists), maps.Clone(c.avail)
 	c.mu.Unlock()
 	for id, v := range avail {
 		_ = c.publish(t.Availability(TopicID(id)), true, []byte(v))
@@ -289,6 +315,9 @@ func (c *Client) onConnect() {
 	}
 	for id, b := range cmdStatus {
 		_ = c.publish(t.CommandStatus(TopicID(id)), true, b)
+	}
+	for id, b := range hookLists {
+		_ = c.publish(t.Webhooks(TopicID(id)), true, b)
 	}
 }
 
@@ -326,6 +355,7 @@ func (c *Client) publishDiscovery() {
 		err := errors.Join(
 			c.publish(t.State(TopicID(id)), true, []byte{}),
 			c.publish(t.CommandStatus(TopicID(id)), true, []byte{}),
+			c.publish(t.Webhooks(TopicID(id)), true, []byte{}),
 			c.publish(t.Availability(TopicID(id)), true, []byte{}))
 		if d := c.cfg.Discovery; d != nil {
 			err = errors.Join(err, c.publish(d.Topic(id), true, []byte{}))

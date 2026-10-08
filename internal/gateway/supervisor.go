@@ -37,6 +37,8 @@ type Publisher interface {
 	PublishEvent(lockID string, e model.Event) error
 	PublishAvailability(lockID string, online bool) error
 	PublishCommandStatus(lockID string, s model.CommandStatus) error
+	PublishWebhooks(lockID string, l model.WebhookList) error
+	PublishWebhooksResult(lockID string, r model.WebhooksResult) error
 }
 
 type Prober func(ctx context.Context, address string) error
@@ -182,6 +184,10 @@ type Supervisor struct {
 
 	webhookOK        bool
 	nextWebhookRetry time.Time
+
+	// Bridge webhook list (spec 5.9).
+	hooks    []bridge.Webhook   // the bridge's webhooks behind hookList, in id order
+	hookList *model.WebhookList // last published list; nil until one was read
 
 	// Bridge webhook delivery: registration only proves the gateway reaches
 	// the bridge, not the reverse (a firewall may block bridge → gateway).
