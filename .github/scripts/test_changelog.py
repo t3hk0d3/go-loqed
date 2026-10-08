@@ -1,6 +1,6 @@
 import unittest
 
-from changelog import ChangelogError, release, released, section
+from changelog import ChangelogError, addon, release, released, section
 
 SAMPLE = """# Changelog
 
@@ -75,6 +75,19 @@ class ReleasedTest(unittest.TestCase):
         self.assertEqual(text.split("## [0.1.1]")[1], SAMPLE.split("## [0.1.1]")[1])
 
 
+class AddonTest(unittest.TestCase):
+    def test_has_no_unreleased_section_or_link(self):
+        text = addon(SAMPLE)
+        self.assertNotIn("Unreleased", text)
+        self.assertNotIn("A thing.", text)
+
+    def test_keeps_the_released_versions_and_their_links(self):
+        text = addon(SAMPLE)
+        self.assertEqual(section(text, "0.1.1"), section(SAMPLE, "0.1.1"))
+        self.assertIn("[0.1.1]: https://github.com/o/r/compare/v0.1.0...v0.1.1", text)
+        self.assertTrue(text.startswith("# Changelog\n\n## [0.1.1]"), text)
+
+
 class RepositoryChangelogTest(unittest.TestCase):
     def test_the_repository_changelog_can_be_released(self):
         with open("CHANGELOG.md", encoding="utf-8") as f:
@@ -88,9 +101,9 @@ class RepositoryChangelogTest(unittest.TestCase):
         with open("CHANGELOG.md", encoding="utf-8") as f:
             root = f.read()
         with open("addon/CHANGELOG.md", encoding="utf-8") as f:
-            addon = f.read()
-        self.assertEqual(released(addon), released(root),
-                         "addon/CHANGELOG.md differs from CHANGELOG.md's released versions; never edit the copy")
+            addon_text = f.read()
+        self.assertEqual(addon_text, addon(root),
+                         "addon/CHANGELOG.md is generated: run python3 .github/scripts/changelog.py addon")
 
 
 if __name__ == "__main__":

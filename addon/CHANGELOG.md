@@ -5,8 +5,6 @@ library are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
 ## [0.2.0] - 2026-10-08
 
 ### Changed
@@ -76,7 +74,6 @@ client library (`bridge`, `cloud`, `cloud/portal`).
 - The Home Assistant OS add-on and the cloud-webhook relay through Home
   Assistant have not been verified end to end yet.
 
-[Unreleased]: https://github.com/t3hk0d3/go-loqed/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/t3hk0d3/go-loqed/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/t3hk0d3/go-loqed/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/t3hk0d3/go-loqed/releases/tag/v0.1.0

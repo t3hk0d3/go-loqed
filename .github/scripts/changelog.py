@@ -4,6 +4,7 @@
     changelog.py release VERSION DATE [FILE]  move [Unreleased] to [VERSION] - DATE
     changelog.py notes VERSION [FILE]         print the section of VERSION
     changelog.py notes Unreleased [FILE]      print the [Unreleased] section
+    changelog.py addon [FILE] [DEST]          write the add-on's copy (released versions only)
 
 `release` fails when [Unreleased] is empty, so a release always says what
 changed. It starts a new empty [Unreleased] section and updates the compare
@@ -44,6 +45,13 @@ def released(text):
     return text.replace("## [Unreleased]\n\n" + body + "\n", "## [Unreleased]\n", 1)
 
 
+def addon(text):
+    """Return the add-on's copy: the released versions only, without the
+    [Unreleased] heading or link (Home Assistant shows it on update)."""
+    text = released(text).replace("## [Unreleased]\n\n", "", 1)
+    return "\n".join(l for l in text.split("\n") if not (LINK.match(l) and LINK.match(l).group(1) == "Unreleased"))
+
+
 def release(text, version, date):
     if any(HEADING.match(l) and HEADING.match(l).group(1) == version for l in text.split("\n")):
         raise ChangelogError(f"## [{version}] already exists")
@@ -72,6 +80,14 @@ def main(argv):
             text = f.read()
         out = release(text, argv[2], argv[3])
         with open(path, "w", encoding="utf-8") as f:
+            f.write(out)
+        return 0
+    if len(argv) >= 2 and argv[1] == "addon":
+        src = argv[2] if len(argv) > 2 else "CHANGELOG.md"
+        dst = argv[3] if len(argv) > 3 else "addon/CHANGELOG.md"
+        with open(src, encoding="utf-8") as f:
+            out = addon(f.read())
+        with open(dst, "w", encoding="utf-8") as f:
             f.write(out)
         return 0
     if len(argv) >= 3 and argv[1] == "notes":
