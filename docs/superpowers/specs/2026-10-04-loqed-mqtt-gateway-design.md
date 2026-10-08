@@ -1,7 +1,7 @@
 # go-loqed: LOQED library + loqed-mqtt gateway — Design
 
 Date: 2026-10-04
-Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1); revised 2026-10-06: cloud webhooks over MQTT (rev 2.2); revised 2026-10-06 after the pre-merge review (rev 2.3)
+Status: Approved; revised 2026-10-04 after adversarial plan review (rev 2); revised 2026-10-05 after real-hardware verification (rev 2.1); revised 2026-10-06: cloud webhooks over MQTT (rev 2.2); revised 2026-10-06 after the pre-merge review (rev 2.3); revised 2026-10-08: configurable bridge webhook timestamp tolerance
 
 **Rev 2.1 (2026-10-05)** — all changes come from tests against a real LOQED Touch, bridge and account (2.5):
 - Command pipeline redesigned (5.8): latest command wins, retries only when a request provably never left, 30 s / 10 s deadlines, local-then-cloud, confirmation from webhooks, retained `command_status` topic.
@@ -69,7 +69,7 @@ Sources: LOQED support docs (updated June 2026), `loqedAPI` 2.1.16 (pinned by HA
   - `GET /webhooks` — `HASH = sha256(ts8 | K)`. Returns list of `{id, url, trigger_*...}`.
   - `POST /webhooks` — body `{url, trigger_state_changed_open, trigger_state_changed_latch, trigger_state_changed_night_lock, trigger_state_changed_unknown, trigger_state_goto_open, trigger_state_goto_latch, trigger_state_goto_night_lock, trigger_battery, trigger_online_status}` (each 0/1; bit 0..8 of a flags bitmap in that order). `HASH = sha256(url | flags as u32 BE | ts8 | K)`.
   - `DELETE /webhooks/{id}` — `HASH = sha256(id as u64 BE | ts8 | K)`.
-- Incoming webhooks (bridge → gateway): `POST` with headers `TIMESTAMP`, `HASH = sha256(body | ts8 | K)`. Receiver must reject requests missing either header (HA core returns 400 since 2026-10-01) and `|now − ts| > 10 s`. The bridge accepts any URL, including public HTTPS (HA registers Nabu Casa cloudhook URLs on the bridge). Payload families:
+- Incoming webhooks (bridge → gateway): `POST` with headers `TIMESTAMP`, `HASH = sha256(body | ts8 | K)`. Receiver must reject requests missing either header (HA core returns 400 since 2026-10-01) and `|now − ts|` above the tolerance (20 s by default, `webhook.bridge_timestamp_tolerance`; loqedAPI uses 10 s). The bridge calls its registered webhooks one after another, so with many of them a webhook arrives late and a 13 s delay was seen on a real bridge (2026-10-08); a stale TIMESTAMP is not only clock skew. The bridge accepts any URL, including public HTTPS (HA registers Nabu Casa cloudhook URLs on the bridge). Payload families:
   - State reached: `{mac_wifi, mac_ble, requested_state, event_type, key_local_id}`; `event_type` ∈ `STATE_CHANGED_OPEN|LATCH|NIGHT_LOCK|UNKNOWN`, `*_REMOTE` variants, `MOTOR_STALL`, …. The reached state comes from `event_type`; `requested_state` is only what was asked for (see 4.1).
   - Going to state: `{mac_wifi, mac_ble, go_to_state (OPEN|DAY_LOCK|NIGHT_LOCK), event_type (GO_TO_STATE_*, e.g. GO_TO_STATE_TOUCH_TO_LOCK), key_local_id}`; `go_to_state` may be absent (target then comes from the event-type suffix); `key_local_id` 255 = unknown, may be `null`.
   - Battery: `{mac_wifi, mac_ble, battery_type, battery_percentage}`.
@@ -192,15 +192,18 @@ func (c *Client) ListWebhooks(ctx) ([]Webhook, error)
 func (c *Client) CreateWebhook(ctx, url string, t Triggers) error // AllTriggers provided
 func (c *Client) DeleteWebhook(ctx, id int) error
 
-// Pure verification + decoding of an incoming webhook.
+// Pure verification + decoding of an incoming webhook. ParseEvent accepts
+// |skew| ≤ MaxClockSkew (20 s); ParseEventWithin takes the tolerance, and 0
+// skips the timestamp check (HASH is still verified).
 func ParseEvent(bridgeKey []byte, body []byte, hash, timestamp string, now time.Time) (Event, error)
+func ParseEventWithin(bridgeKey []byte, body []byte, hash, timestamp string, now time.Time, maxSkew time.Duration) (Event, error)
 ```
 
 `Event` is an interface implemented by `StateReachedEvent`, `GoToStateEvent`, `BatteryEvent`, `OnlineEvent`. Each carries `MacWifi`, `MacBLE`; state events carry raw `EventType` and `KeyLocalID *int` (a real key 0..254; nil for 255, `null`, `""`, absent or out of range = no key).
 
 Classification is by `event_type` prefix: `GO_TO_STATE_*` → `GoToStateEvent` (target from `go_to_state`); everything else with an `event_type` → `StateReachedEvent`. The reached bolt state of a `StateReachedEvent` is derived from `event_type` exactly like loqedAPI (`STATE_CHANGED_OPEN[_REMOTE]` → open, `…_LATCH` → day_lock, `…_NIGHT_LOCK` → night_lock, anything else → unknown), never from `requested_state` (which is only what was asked for and is kept as a raw `RequestedState` field). `MOTOR_STALL` sets `Jammed: true` with bolt unknown. The same rules apply to cloud webhooks.
 
-Verification order is HASH first, then timestamp skew (`now.Unix() − ts`, integer seconds, |skew| ≤ 10), so unauthenticated requests never produce clock-skew diagnostics.
+Verification order is HASH first, then timestamp skew (`now.Unix() − ts`, integer seconds, |skew| ≤ the tolerance in whole seconds), so unauthenticated requests never produce clock-skew diagnostics.
 
 Signing helpers (`signCommand`, `webhookHash`) are unexported but covered by golden-vector tests.
 
@@ -270,6 +273,7 @@ webhook:
   private_url: ""            # base URL the bridge calls (LAN), e.g. http://10.0.0.5:8099; empty = auto-detect per lock
   public_url: ""             # internet-reachable base URL for cloud webhooks (reverse proxy); empty = cloud webhooks off
   cloud_secret: ""           # path secret for the cloud endpoint; empty = generate once and store in cache
+  bridge_timestamp_tolerance: 20s  # accepted |now − TIMESTAMP| of a bridge webhook (late delivery or clock skew); 0 = no check (HASH still verified; a captured webhook could be replayed); otherwise at least 1s
 mqtt:
   url: ""                    # empty under Supervisor = auto from services API
   username: ""

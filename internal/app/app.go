@@ -214,7 +214,8 @@ func Run(ctx context.Context, o Options) error {
 
 	srv := &http.Server{
 		Handler: webhook.NewHandler(webhook.Options{Sink: manager, CloudSecret: cloudSecret,
-			MQTTDownFor: mq.DisconnectedFor, Now: now, Log: log}),
+			BridgeTimestampTolerance: cfg.Webhook.BridgeTimestampTolerance.D(),
+			MQTTDownFor:              mq.DisconnectedFor, Now: now, Log: log}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

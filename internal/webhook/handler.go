@@ -31,10 +31,13 @@ type Sink interface {
 
 type Options struct {
 	Sink        Sink
-	CloudSecret string               // empty disables POST /cloud/{secret}/{id}
-	MQTTDownFor func() time.Duration // 0 while connected
-	Now         func() time.Time
-	Log         *slog.Logger
+	CloudSecret string // empty disables POST /cloud/{secret}/{id}
+	// BridgeTimestampTolerance is the accepted age of a bridge webhook's
+	// TIMESTAMP; 0 accepts any age.
+	BridgeTimestampTolerance time.Duration
+	MQTTDownFor              func() time.Duration // 0 while connected
+	Now                      func() time.Time
+	Log                      *slog.Logger
 }
 
 // HealthReport is the /healthz body.
@@ -70,11 +73,14 @@ func (o Options) bridgeWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	ev, err := bridge.ParseEvent(key, body, hash, ts, o.Now())
+	ev, err := bridge.ParseEventWithin(key, body, hash, ts, o.Now(), o.BridgeTimestampTolerance)
 	switch {
 	case errors.Is(err, loqed.ErrStaleTimestamp):
-		// Only reachable with a valid HASH, so this is a real clock problem.
-		o.Log.Warn("rejected a bridge webhook with a stale timestamp", "lock_id", id, "err", err)
+		// Only reachable with a valid HASH: the bridge delivered it late
+		// (it calls its webhooks one after another) or the clocks differ.
+		o.Log.Warn("rejected a bridge webhook with a stale timestamp; if the bridge delivers late, raise "+
+			"webhook.bridge_timestamp_tolerance (0 turns the check off), otherwise check NTP on this host and the bridge",
+			"lock_id", id, "err", err)
 		http.Error(w, "stale timestamp", http.StatusUnauthorized)
 		return
 	case errors.Is(err, loqed.ErrBadSignature):

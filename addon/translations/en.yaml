@@ -23,6 +23,10 @@ configuration:
   webhook:
     name: Webhooks
     description: private_url is the address the bridge calls (auto-detected when empty). public_url (scheme and host only) enables cloud webhooks; the log then shows one URL per lock to register at app.loqed.com.
+    fields:
+      bridge_timestamp_tolerance:
+        name: Bridge webhook timestamp tolerance
+        description: How old a bridge webhook may be when it arrives. Default 20s; raise it if the log warns about stale timestamps (a bridge with many webhooks delivers late). 0 turns the check off.
   mqtt:
     name: MQTT
     description: Leave url empty to use the Mosquitto add-on. cloud_webhooks accepts LOQED cloud webhooks relayed by a Home Assistant automation (see Documentation).

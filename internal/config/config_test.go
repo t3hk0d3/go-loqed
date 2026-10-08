@@ -284,6 +284,43 @@ func TestKeyNamesEntryWithoutIDFails(t *testing.T) {
 	}
 }
 
+func TestBridgeTimestampTolerance(t *testing.T) {
+	cases := []struct {
+		name string
+		src  config.Sources
+		want time.Duration
+	}{
+		{"default", config.Sources{}, 20 * time.Second},
+		{"options.json", config.Sources{OptionsFile: write(t, "options.json", `{"webhook":{"bridge_timestamp_tolerance":"1m"}}`)}, time.Minute},
+		{"YAML", config.Sources{ConfigFile: write(t, "config.yaml", "webhook:\n  bridge_timestamp_tolerance: 45s\n")}, 45 * time.Second},
+		{"env", config.Sources{Environ: []string{"LOQED_WEBHOOK__BRIDGE_TIMESTAMP_TOLERANCE=2m"}}, 2 * time.Minute},
+		{"0 turns the check off", config.Sources{ConfigFile: write(t, "off.yaml", "webhook:\n  bridge_timestamp_tolerance: 0\n")}, 0},
+	}
+	for _, c := range cases {
+		if c.src.OptionsFile == "" {
+			c.src.OptionsFile = "/nonexistent/options.json"
+		}
+		cfg, err := config.Load(c.src)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := cfg.Webhook.BridgeTimestampTolerance.D(); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBridgeTimestampToleranceValidation(t *testing.T) {
+	for _, d := range []time.Duration{-time.Second, 500 * time.Millisecond} {
+		c := config.Defaults()
+		c.CloudToken = "t"
+		c.Webhook.BridgeTimestampTolerance = config.Duration(d)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "webhook.bridge_timestamp_tolerance") {
+			t.Errorf("%v: got %v", d, err)
+		}
+	}
+}
+
 func TestMQTTCloudWebhooksDefaultsOff(t *testing.T) {
 	cfg, err := config.Load(config.Sources{OptionsFile: "/nonexistent/options.json"})
 	if err != nil {

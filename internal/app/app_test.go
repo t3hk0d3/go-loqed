@@ -121,7 +121,12 @@ func (f *fakeBridge) move(key, action byte, hooks []string) {
 
 // postSigned POSTs a bridge webhook signed with the bridge key.
 func postSigned(hookURL, body string) {
-	ts := time.Now().Unix()
+	postSignedAt(hookURL, body, time.Now().Unix())
+}
+
+// postSignedAt POSTs a bridge webhook with TIMESTAMP ts and returns the
+// status code (0 when the request failed).
+func postSignedAt(hookURL, body string, ts int64) int {
 	h := sha256.New()
 	h.Write([]byte(body))
 	h.Write(binary.BigEndian.AppendUint64(nil, uint64(ts)))
@@ -129,9 +134,12 @@ func postSigned(hookURL, body string) {
 	req, _ := http.NewRequest(http.MethodPost, hookURL, strings.NewReader(body))
 	req.Header["TIMESTAMP"] = []string{strconv.FormatInt(ts, 10)} // verbatim, like the bridge
 	req.Header["HASH"] = []string{hex.EncodeToString(h.Sum(nil))}
-	if resp, err := http.DefaultClient.Do(req); err == nil {
-		_ = resp.Body.Close()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0
 	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
 }
 
 func (f *fakeBridge) snapshot() ([]string, []byte) {
@@ -465,6 +473,34 @@ func startLock(t *testing.T, fb *fakeBridge, timing ...func(*gateway.Timing)) *t
 		return len(hooks) == 1
 	})
 	return sub
+}
+
+func TestBridgeWebhookTimestampToleranceIsConfigurable(t *testing.T) {
+	broker := testutil.StartBroker(t)
+	fb := &fakeBridge{bolt: "day_lock"}
+	bridgeSrv := httptest.NewServer(fb)
+	t.Cleanup(bridgeSrv.Close)
+	var calls atomic.Int32
+	cloudSrv := fakeCloud(t, strings.TrimPrefix(bridgeSrv.URL, "http://"), &calls)
+	cfg := baseConfig(filepath.Join(t.TempDir(), "locks.json"), broker)
+	cfg.MQTT.ClientID = "gw-" + t.Name()
+	cfg.Webhook.BridgeTimestampTolerance = config.Duration(time.Minute)
+	start(t, cfg, cloudSrv.URL)
+	var hook string
+	eventually(t, "webhook registration", func() bool {
+		hooks, _ := fb.snapshot()
+		if len(hooks) == 1 {
+			hook = hooks[0]
+		}
+		return hook != ""
+	})
+	body := `{"battery_type":"NICKEL_METAL_HYDRIDE","battery_percentage":80,"mac_wifi":"aa","mac_ble":"bb"}`
+	if code := postSignedAt(hook, body, time.Now().Add(-45*time.Second).Unix()); code != http.StatusOK {
+		t.Errorf("45s late within a 1m tolerance: got %d", code)
+	}
+	if code := postSignedAt(hook, body, time.Now().Add(-90*time.Second).Unix()); code != http.StatusUnauthorized {
+		t.Errorf("90s late outside a 1m tolerance: got %d", code)
+	}
 }
 
 func TestEndToEndCommandIsConfirmedByWebhooks(t *testing.T) {

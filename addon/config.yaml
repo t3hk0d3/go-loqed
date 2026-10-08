@@ -58,6 +58,7 @@ schema:
     private_url: str?
     public_url: str?
     cloud_secret: password?
+    bridge_timestamp_tolerance: str?
   mqtt:
     url: str?
     username: str?

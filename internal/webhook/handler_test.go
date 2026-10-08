@@ -76,7 +76,7 @@ func (f *fakeSink) Health() map[string]gateway.Health {
 }
 
 func handler(sink *fakeSink, mqttDown time.Duration, cloudSecret string) http.Handler {
-	return webhook.NewHandler(webhook.Options{Sink: sink, CloudSecret: cloudSecret,
+	return webhook.NewHandler(webhook.Options{Sink: sink, CloudSecret: cloudSecret, BridgeTimestampTolerance: 20 * time.Second,
 		MQTTDownFor: func() time.Duration { return mqttDown },
 		Now:         func() time.Time { return now }, Log: slog.New(slog.DiscardHandler)})
 }
@@ -139,6 +139,41 @@ func TestBridgeWebhookErrors(t *testing.T) {
 		}
 		if c.want != 200 && len(sink.bridgeEvents) != 0 {
 			t.Errorf("%s: rejected event was delivered", c.name)
+		}
+	}
+}
+
+func TestBridgeWebhookTimestampTolerance(t *testing.T) {
+	hash, ts := signed(reached, now.Unix()-90)
+	cases := []struct {
+		name      string
+		tolerance time.Duration
+		want      int
+	}{
+		{"within", 2 * time.Minute, 200},
+		{"outside", time.Minute, 401},
+		{"check off", 0, 200},
+	}
+	for _, c := range cases {
+		sink := &fakeSink{}
+		h := webhook.NewHandler(webhook.Options{Sink: sink, BridgeTimestampTolerance: c.tolerance,
+			MQTTDownFor: func() time.Duration { return 0 }, Now: func() time.Time { return now }, Log: slog.New(slog.DiscardHandler)})
+		if code := post(h, "/webhook/lock1", reached, map[string]string{"HASH": hash, "TIMESTAMP": ts}); code != c.want {
+			t.Errorf("%s: got %d want %d", c.name, code, c.want)
+		}
+	}
+}
+
+func TestStaleBridgeWebhookLogNamesTheSetting(t *testing.T) {
+	var buf bytes.Buffer
+	h := webhook.NewHandler(webhook.Options{Sink: &fakeSink{}, BridgeTimestampTolerance: 20 * time.Second,
+		MQTTDownFor: func() time.Duration { return 0 }, Now: func() time.Time { return now },
+		Log: slog.New(slog.NewTextHandler(&buf, nil))})
+	hash, ts := signed(reached, now.Unix()-25)
+	post(h, "/webhook/lock1", reached, map[string]string{"HASH": hash, "TIMESTAMP": ts})
+	for _, want := range []string{"webhook.bridge_timestamp_tolerance", "25s"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log %q does not mention %q", buf.String(), want)
 		}
 	}
 }

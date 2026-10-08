@@ -11,8 +11,11 @@ import (
 	loqed "github.com/t3hk0d3/go-loqed"
 )
 
-// MaxClockSkew is the accepted difference between webhook TIMESTAMP and now.
-const MaxClockSkew = 10 * time.Second
+// MaxClockSkew is ParseEvent's accepted difference between webhook
+// TIMESTAMP and now. It covers clock skew and late delivery: the bridge
+// delivers to its registered webhooks one after another, so with many of
+// them a webhook arrives well after it was signed.
+const MaxClockSkew = 20 * time.Second
 
 // Event is a verified webhook from the bridge.
 type Event interface{ isEvent() }
@@ -72,11 +75,18 @@ type rawEvent struct {
 	BLEStrength       *loqed.Int    `json:"ble_strength"`
 }
 
-// ParseEvent verifies and decodes a webhook POSTed by the bridge.
-// hash and timestamp are the HASH and TIMESTAMP header values. The hash is
-// checked before the timestamp, so only authentic requests can report clock
-// skew. Skew is compared in whole seconds, like loqedAPI.
+// ParseEvent verifies and decodes a webhook POSTed by the bridge, accepting
+// a TIMESTAMP within MaxClockSkew of now.
 func ParseEvent(bridgeKey, body []byte, hash, timestamp string, now time.Time) (Event, error) {
+	return ParseEventWithin(bridgeKey, body, hash, timestamp, now, MaxClockSkew)
+}
+
+// ParseEventWithin is ParseEvent with a TIMESTAMP tolerance of maxSkew; 0
+// accepts any age (a captured webhook can then be replayed). hash and
+// timestamp are the HASH and TIMESTAMP header values. The hash is checked
+// before the timestamp, so only authentic requests can report skew. Skew is
+// compared in whole seconds, like loqedAPI.
+func ParseEventWithin(bridgeKey, body []byte, hash, timestamp string, now time.Time, maxSkew time.Duration) (Event, error) {
 	hash = strings.ToLower(strings.TrimSpace(hash))
 	ts, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
 	if err != nil || hash == "" || ts < 0 {
@@ -86,9 +96,10 @@ func ParseEvent(bridgeKey, body []byte, hash, timestamp string, now time.Time) (
 	if subtle.ConstantTimeCompare([]byte(want), []byte(hash)) != 1 {
 		return nil, fmt.Errorf("%w: HASH mismatch", loqed.ErrBadSignature)
 	}
-	skew := now.Unix() - ts
-	if skew > int64(MaxClockSkew/time.Second) || skew < -int64(MaxClockSkew/time.Second) {
-		return nil, fmt.Errorf("%w: clock skew %ds (check NTP on this host and the bridge)", loqed.ErrStaleTimestamp, skew)
+	if limit := int64(maxSkew / time.Second); maxSkew > 0 {
+		if skew := now.Unix() - ts; skew > limit || skew < -limit {
+			return nil, fmt.Errorf("%w: TIMESTAMP is %ds off, more than %ds (delivered late or clocks differ)", loqed.ErrStaleTimestamp, skew, limit)
+		}
 	}
 	var r rawEvent
 	if err := json.Unmarshal(body, &r); err != nil {
