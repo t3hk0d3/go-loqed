@@ -4,3 +4,14 @@ dist
 docs
 addon
 *.md
+
+# local secrets (keep the committed template)
+**/.env*
+!**/.env.example
+
+# scratch / tooling dirs not needed for the build
+.claude
+.superpowers
+.devcontainer
+.github
+testdata
