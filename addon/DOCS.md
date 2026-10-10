@@ -55,8 +55,11 @@ cloud does not provide local credentials for a lock.
   must be within 20 seconds of this host's clock. A bridge with many
   registered webhooks can deliver later than that; the log then warns about
   a stale timestamp. Raise `bridge_timestamp_tolerance` under **Webhooks**
-  (for example `60s`), or set it to `0` to turn the check off. With the
-  check off the signature is still verified, but a recorded webhook could be
+  (for example `60s`), or set it to `0` to turn the check off. A webhook
+  that arrives more than once is applied only once, so a repeat or a
+  resent copy cannot bring back an older lock state. With the check off
+  the signature is still verified, but the gateway remembers only its last
+  256 webhooks per lock, so an older recorded webhook could still be
   replayed by someone on your network.
 - **Lock events are best-effort.** The bridge occasionally loses a webhook.
   Use the lock entity, not the event entity, for automations that depend on

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ const secret = "0123456789abcdef0123456789abcdef"
 var now = time.Unix(1700000000, 0)
 
 type fakeSink struct {
+	mu           sync.Mutex
 	bridgeEvents []bridge.Event
 	cloudEvents  []cloud.WebhookEvent
 	cloudLocks   []string
@@ -42,6 +44,8 @@ func (f *fakeSink) BridgeKey(id string) ([]byte, bool) {
 }
 
 func (f *fakeSink) DeliverBridgeEvent(_ string, ev bridge.Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.busy {
 		return gateway.ErrBusy
 	}
@@ -294,5 +298,185 @@ func TestRejectedCloudWebhooksAreLoggedWithoutSecret(t *testing.T) {
 	}
 	if strings.Contains(out, wrong) || strings.Contains(out, secret) {
 		t.Fatalf("secret logged: %s", out)
+	}
+}
+
+const unlocked = `{"requested_state":"OPEN","event_type":"STATE_CHANGED_OPEN","key_local_id":255}`
+
+func signedHeader(body string, ts int64) map[string]string {
+	hash, t := signed(body, ts)
+	return map[string]string{"HASH": hash, "TIMESTAMP": t}
+}
+
+func TestRepeatedBridgeWebhookDeliveryIsAppliedOnce(t *testing.T) {
+	cases := []struct {
+		name      string
+		tolerance time.Duration
+	}{
+		{"timestamp check on", 20 * time.Second},
+		{"timestamp check off", 0},
+	}
+	for _, c := range cases {
+		sink := &fakeSink{}
+		h := webhook.NewHandler(webhook.Options{Sink: sink, BridgeTimestampTolerance: c.tolerance,
+			Now: func() time.Time { return now }, Log: slog.New(slog.DiscardHandler)})
+		hdr := signedHeader(reached, now.Unix())
+		if code := post(h, "/webhook/lock1", reached, hdr); code != 200 {
+			t.Fatalf("%s: first delivery: %d", c.name, code)
+		}
+		if code := post(h, "/webhook/lock1", reached, hdr); code != 200 {
+			t.Errorf("%s: a repeat must be answered 200 (idempotent), got %d", c.name, code)
+		}
+		if len(sink.bridgeEvents) != 1 {
+			t.Errorf("%s: repeat was applied: %d events", c.name, len(sink.bridgeEvents))
+		}
+	}
+}
+
+func TestRepeatedBridgeWebhookWithReformattedHeadersIsAppliedOnce(t *testing.T) {
+	sink := &fakeSink{}
+	h := handler(sink, 0, "")
+	hash, ts := signed(reached, now.Unix())
+	post(h, "/webhook/lock1", reached, map[string]string{"HASH": hash, "TIMESTAMP": ts})
+	post(h, "/webhook/lock1", reached, map[string]string{"HASH": " " + strings.ToUpper(hash) + " ", "TIMESTAMP": "0" + ts})
+	if len(sink.bridgeEvents) != 1 {
+		t.Fatalf("repeat with an upper-case HASH was applied: %d events", len(sink.bridgeEvents))
+	}
+}
+
+func TestRepeatedBridgeWebhookAfterAnotherEventIsIgnored(t *testing.T) {
+	sink := &fakeSink{}
+	h := handler(sink, 0, "")
+	locked := signedHeader(reached, now.Unix()-5)
+	post(h, "/webhook/lock1", reached, locked)
+	post(h, "/webhook/lock1", unlocked, signedHeader(unlocked, now.Unix()))
+	post(h, "/webhook/lock1", reached, locked)
+	if len(sink.bridgeEvents) != 2 {
+		t.Fatalf("got %d events, want 2 (locked, unlocked)", len(sink.bridgeEvents))
+	}
+	if ev, ok := sink.bridgeEvents[1].(bridge.StateReachedEvent); !ok || ev.EventType != "STATE_CHANGED_OPEN" {
+		t.Fatalf("last event %#v", sink.bridgeEvents[1])
+	}
+}
+
+func TestDifferentBridgeWebhooksWithTheSameTimestampAreApplied(t *testing.T) {
+	sink := &fakeSink{}
+	h := handler(sink, 0, "")
+	for _, body := range []string{reached, unlocked} {
+		if code := post(h, "/webhook/lock1", body, signedHeader(body, now.Unix())); code != 200 {
+			t.Fatalf("code %d", code)
+		}
+	}
+	if len(sink.bridgeEvents) != 2 {
+		t.Fatalf("got %d events, want 2", len(sink.bridgeEvents))
+	}
+}
+
+func TestAppliedDeliveriesAreRememberedUpToACapPerLock(t *testing.T) {
+	// With the timestamp check off the bounded memory is all there is; it
+	// must not grow without limit, so the oldest entry goes first.
+	sink := &fakeSink{}
+	h := webhook.NewHandler(webhook.Options{Sink: sink, Now: func() time.Time { return now }, Log: slog.New(slog.DiscardHandler)})
+	hdr := signedHeader(reached, now.Unix())
+	post(h, "/webhook/lock1", reached, hdr)
+	for i := range webhook.MaxSeenPerLock {
+		body := `{"wifi_strength":` + strconv.Itoa(i) + `}`
+		post(h, "/webhook/lock1", body, signedHeader(body, now.Unix()))
+	}
+	if got := webhook.SeenCount(h, "lock1"); got != webhook.MaxSeenPerLock {
+		t.Fatalf("remembered %d, want the cap %d", got, webhook.MaxSeenPerLock)
+	}
+	post(h, "/webhook/lock1", reached, hdr)
+	if got := len(sink.bridgeEvents); got != webhook.MaxSeenPerLock+2 {
+		t.Fatalf("oldest delivery was not forgotten at the cap: %d events", got)
+	}
+}
+
+func TestBridgeWebhookIsForgottenAfterTwiceTheTolerance(t *testing.T) {
+	sink := &fakeSink{}
+	clock := now
+	h := webhook.NewHandler(webhook.Options{Sink: sink, BridgeTimestampTolerance: time.Hour,
+		Now: func() time.Time { return clock }, Log: slog.New(slog.DiscardHandler)})
+	hdr := signedHeader(reached, now.Unix()+3500) // future TIMESTAMP: still within the tolerance much later
+	post(h, "/webhook/lock1", reached, hdr)
+	clock = now.Add(time.Hour)
+	post(h, "/webhook/lock1", reached, hdr)
+	if len(sink.bridgeEvents) != 1 {
+		t.Fatalf("forgotten within the window: %d events", len(sink.bridgeEvents))
+	}
+	clock = now.Add(2*time.Hour + 3*time.Second)
+	post(h, "/webhook/lock1", unlocked, signedHeader(unlocked, clock.Unix())) // prunes
+	if got := webhook.SeenCount(h, "lock1"); got != 1 {
+		t.Fatalf("expired entries kept: %d remembered", got)
+	}
+}
+
+func TestFailedBridgeWebhookDeliveryCanBeRetried(t *testing.T) {
+	sink := &fakeSink{busy: true}
+	h := handler(sink, 0, "")
+	hdr := signedHeader(reached, now.Unix())
+	if code := post(h, "/webhook/lock1", reached, hdr); code != 503 {
+		t.Fatalf("busy: %d", code)
+	}
+	sink.busy = false
+	if code := post(h, "/webhook/lock1", reached, hdr); code != 200 || len(sink.bridgeEvents) != 1 {
+		t.Fatalf("retry after 503: code %d events %d", code, len(sink.bridgeEvents))
+	}
+}
+
+func TestConcurrentRepeatsAreAppliedExactlyOnce(t *testing.T) {
+	sink := &fakeSink{}
+	h := handler(sink, 0, "")
+	hdr := signedHeader(reached, now.Unix())
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			if code := post(h, "/webhook/lock1", reached, hdr); code != 200 {
+				t.Errorf("code %d", code)
+			}
+		})
+	}
+	wg.Wait()
+	if len(sink.bridgeEvents) != 1 {
+		t.Fatalf("applied %d times", len(sink.bridgeEvents))
+	}
+}
+
+func TestBadSignatureIsNotRememberedAsApplied(t *testing.T) {
+	sink := &fakeSink{}
+	h := handler(sink, 0, "")
+	hash, ts := signed(reached, now.Unix())
+	if code := post(h, "/webhook/lock1", unlocked, map[string]string{"HASH": hash, "TIMESTAMP": ts}); code != 401 {
+		t.Fatalf("forged body: %d", code)
+	}
+	if code := post(h, "/webhook/lock1", reached, map[string]string{"HASH": hash, "TIMESTAMP": ts}); code != 200 || len(sink.bridgeEvents) != 1 {
+		t.Fatalf("genuine webhook after a forged one with its HASH: code %d events %d", code, len(sink.bridgeEvents))
+	}
+}
+
+func TestRepeatedDeliveryLogIsRateLimitedAndHasNoSignatureOrBody(t *testing.T) {
+	var buf bytes.Buffer
+	clock := now
+	h := webhook.NewHandler(webhook.Options{Sink: &fakeSink{}, BridgeTimestampTolerance: time.Hour,
+		Now: func() time.Time { return clock }, Log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	hash, ts := signed(reached, now.Unix())
+	hdr := map[string]string{"HASH": hash, "TIMESTAMP": ts}
+	for range 5 {
+		post(h, "/webhook/lock1", reached, hdr)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "already applied"); n != 1 {
+		t.Fatalf("want one log line, got %d: %s", n, out)
+	}
+	clock = now.Add(11 * time.Minute)
+	post(h, "/webhook/lock1", reached, hdr)
+	out = buf.String()
+	if n := strings.Count(out, "already applied"); n != 2 || !strings.Contains(out, "repeated=3") {
+		t.Fatalf("want a second line counting the suppressed ones: %s", out)
+	}
+	for _, leak := range []string{hash, strings.ToUpper(hash), "NIGHT_LOCK", ts} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("log contains %q: %s", leak, out)
+		}
 	}
 }
