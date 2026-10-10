@@ -143,7 +143,7 @@ dispatch(event):
 
 | Effect | Performed by | Bound |
 |---|---|---|
-| `PublishState{Lock, State}`, `PublishAvailability`, `PublishEvent`, `PublishCommandStatus`, `PublishWebhooks`, `PublishWebhooksResult` | `Publisher` (`*mqtt.Client`) | Never waits for PUBACK; paho handoff bounded by `WriteTimeout` 2 s (§8.3). |
+| `PublishState{Ref, Lock, State}`, `PublishAvailability`, `PublishEvent`, `PublishCommandStatus`, `PublishWebhooks`, `PublishWebhooksResult` | `Publisher` (`*mqtt.Client`) | Handoff inline, never waits for PUBACK; bounded by `WriteTimeout` 2 s. The outcome comes back later as `PublishDone` (§8.3). |
 | `Log{Level, Msg, Attrs}` | `slog` | — |
 
 **Asynchronous I/O** (goroutine; result event back):
@@ -161,6 +161,7 @@ dispatch(event):
 | `SaveBudget{Ref, State}` (account) | `BudgetSaved{Ref, Err}` | disk |
 | `MergeLocks{Ref, Locks, TokenHash}` (account) | `LocksMerged{Ref, Records, Removed, Err}` | disk |
 | `SaveCloudID{Lock, ID}` (Directory) | none (failure logged by the executor) | disk |
+| (outcome of any `Publish*` above) | `PublishDone{Ref, Kind, Err}`; `Kind` names the topic kind (state, event, availability, command_status, webhooks, webhooks_result), never the payload | `PublishTimeout` 30 s → `ErrPublishTimeout` |
 
 **Routed** (between reducers, no I/O):
 
@@ -207,6 +208,7 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 | `RecordChanged{Record}` | account | Replace the record, bump `recordGen`, recompute `bridgeUsable`. |
 | `TokenChanged` | account | Store expiry; next state publish carries it. |
 | result events (§5.3) and `ReadResult`, `CommandResult`, `RefreshResult` | executor / account | Matched by `Ref` to the waiting operation (§6.2). |
+| `PublishDone{Kind, Err}` | executor | No state change. On an error: a rate-limited warning `publishing <kind> failed` (today's per-call warnings). Nothing waits for it: no transition depends on a PUBACK. |
 
 ### 6.2 I/O slots and operations
 
@@ -391,7 +393,7 @@ Unbudgeted and never queued behind reads: a `CommandRequest` waits only for a to
 
 ### 8.1 Goroutines and contexts
 
-- One goroutine per asynchronous effect, with a context derived from the program context and the effect's deadline or timeout. No pools: in-flight effects are bounded by the slots in §6.2 and §7 (per lock: one bridge call, two probes, one read request, one refresh; account: one read, one token operation, one store write of each kind, the cloud commands in flight).
+- One goroutine per asynchronous effect, with a context derived from the program context and the effect's deadline or timeout. No pools: in-flight effects are bounded by the slots in §6.2 and §7 (per lock: one bridge call, two probes, one read request, one refresh; account: one read, one token operation, one store write of each kind, the cloud commands in flight). Publish-outcome goroutines are not slot-bounded but each ends at PUBACK, on a paho error or after 30 s.
 - `ErrNotAttempted`: before dialing a command (bridge or cloud), the goroutine checks its absolute deadline.
 - Results are sent to the loop's results channel; on shutdown they are dropped.
 
@@ -402,7 +404,8 @@ The executor builds a `*bridge.Client` per lock and `recordGen` on first use (pu
 ### 8.3 MQTT publishing
 
 - `SetWriteTimeout(2 * time.Second)` in the client options: a stuck socket costs the loop at most 2 s once; paho then drops the connection and later publishes fail at once until it reconnects.
-- `publish` hands the message to paho and returns; it does not wait for PUBACK. An error already on the token (not connected, handoff timeout) is logged, rate-limited. Delivery handles are not needed: no reducer reacts to a PUBACK.
+- `publish` hands the message to paho and returns its token; it does not wait for PUBACK.
+- **Publish outcomes as events.** For each `Publish*` effect the executor starts a goroutine that waits for the token (`Done()`, or `PublishTimeout` 30 s, or program shutdown) and sends `PublishDone{Ref, Kind, Err}` to the emitting lock: `nil` on PUBACK, the paho error (not connected, handoff timeout, connection lost), or `ErrPublishTimeout`. The goroutine is the only waiter; the loop never waits. Outcomes may arrive in any order, and reducers must not depend on that order. The reducer turns errors into rate-limited warnings today; the event is also the hook for anything that later needs delivery feedback (metrics, a health flag). Publishes the MQTT client makes on its own (discovery, the reconnect republish, removed-lock cleanup) produce no events.
 - `retainMu` covers one topic's "update cache, hand to paho"; the reconnect republish takes it per topic and sends that topic's current value, so a concurrent newer value is never overtaken by a stale one.
 - Publishes run inline on the loop in effect order, so a lock's messages leave in the order its reducer produced them (paho has one writer). There is no queue of our own: paho's writer is the queue.
 - `Close` publishes the retained `offline` status and waits for it at most 2 s, then disconnects with a short quiesce (as today).
@@ -565,6 +568,11 @@ lock.Model.Update
             - falls back to cloud mode when local mode cannot continue
     WebhooksRequest
         - checks, plans and steps exactly as gateway 5.9; steps use the bridge slot and wait while a command is busy
+    PublishDone
+        On nil
+            - changes nothing
+        On an error
+            - logs a rate-limited warning naming the topic kind (never the payload)
     Due
         - returns the earliest of the model's schedules and the next local retry
 
@@ -617,6 +625,7 @@ exec.Executor
     Run
         On a publish effect
             - hands it to paho and returns without waiting for PUBACK
+            - later sends exactly one PublishDone with the effect's Ref: nil on PUBACK, the paho error, or ErrPublishTimeout after 30 s
         On BridgeCommand or CloudCommand past its deadline
             - returns ErrNotAttempted without a network request
         On a bridge effect
@@ -641,7 +650,7 @@ mqtt.Client
 - **Scenario harness** (`engine/lock/harness_test.go`): the ported harness keeps today's verbs (`start`, `advance`, `send`, `command`, `toCloud`). It runs a lock model plus a real account model with a **synchronous fake executor** that resolves each effect against the existing `fakeBridge`/`fakeCloud`/`fakePub` and feeds the result back until quiescent. Existing scenario tests port almost line for line. A **held** mode keeps chosen effects pending so tests can interleave (command during a status read, result after a mode change).
 - **Invariant checks**: a harness hook validates every effect list: no `BridgeCommand` after a no-response/answer result for the same command, no two bridge effects in flight per lock, no `ListLocks` without a preceding `BudgetSaved`, no command effect past its deadline.
 - **Program tests** (`engine`): routing, ordering of routed effects, `ErrBusy`, removal dropping results, timer/heartbeat, shutdown; run with `-race -count=5`.
-- **Executor tests** (`engine/exec`): `ErrNotAttempted`, per-lock bridge mutex never contended under the reducer, one result per effect.
+- **Executor tests** (`engine/exec`): `PublishDone` for PUBACK, not connected and a withheld PUBACK (timeout), `ErrNotAttempted`, per-lock bridge mutex never contended under the reducer, one result per effect.
 - **App integration** (`internal/app`): the existing end-to-end tests (in-process broker, `httptest` bridge and cloud) run unchanged against the swapped wiring.
 
 ## 13. Behaviour differences (need explicit acceptance)
