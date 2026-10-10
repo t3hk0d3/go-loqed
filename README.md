@@ -224,3 +224,13 @@ stay on the last release.
     go test -race ./...
     go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
     python3 testdata/gen_vectors.py   # regenerate signing golden vectors
+
+## License
+
+Copyright (C) 2026 Igor Yamolov. Licensed under the GNU Affero General Public
+License v3.0 or later (AGPL-3.0-or-later); see [LICENSE](LICENSE).
+
+In practice: if you run a modified version as a network service, you must
+make your modified source available to its users.
+
+Not affiliated with LOQED.

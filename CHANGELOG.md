@@ -7,6 +7,10 @@ library are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The project is now licensed under the GNU AGPL v3.0 or later.
+
 ## [0.2.0] - 2026-10-08
 
 ### Changed
