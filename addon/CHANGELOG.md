@@ -5,6 +5,44 @@ library are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-10
+
+### Added
+
+- The project is now licensed under the GNU AGPL v3.0 or later.
+- Library: package documentation (authentication, the safety rules for
+  commands and retries, rate limits, concurrency) and runnable examples.
+
+### Changed
+
+- Library: the Go library (`github.com/t3hk0d3/go-loqed`) is now its own
+  module, without the gateway's dependencies, and works with Go 1.22 and
+  newer. Import paths are unchanged. The gateway moved to the
+  `github.com/t3hk0d3/go-loqed/loqed-mqtt` module; images and the add-on
+  are unchanged.
+- Library: the lock keys (`cloud.Lock.KeySecret`, `BridgeKey`, `BackendKey`,
+  `bridge.Credentials.BridgeKey`, `KeySecret`) and `portal.Token.Value` are
+  now of type `loqed.Secret`. It prints, logs and encodes to JSON as
+  `[redacted]`; `Reveal()` (or `string(s)`) returns the value. Decoding is
+  unchanged.
+
+### Fixed
+
+- Security hardening: the gateway no longer follows HTTP redirects from the
+  bridge. A device that takes over the bridge's IP address can no longer
+  bounce signed lock commands or webhook changes to another host; a redirect
+  now fails the request, and a lock command that got one is not sent again.
+- loqed-mqtt now logs a warning when it cannot connect to the MQTT broker,
+  naming the broker (without credentials), the reason (connection refused,
+  bad username or password, timeout, TLS, ...) and which settings to check.
+  Before, a wrong `mqtt.url` or password, or a broker that was down, logged
+  nothing. Repeats of the same reason are logged at most every 10 minutes
+  with a count, and the next successful connect reports how many attempts
+  failed.
+- Lock keys, tokens and passwords no longer show up in full when a lock,
+  its credentials or the settings are printed or logged; they appear as
+  `[redacted]`. The credential cache (`/data/locks.json`) is unchanged.
+
 ## [0.2.0] - 2026-10-08
 
 ### Changed
@@ -74,6 +112,7 @@ client library (`bridge`, `cloud`, `cloud/portal`).
 - The Home Assistant OS add-on and the cloud-webhook relay through Home
   Assistant have not been verified end to end yet.
 
+[0.3.0]: https://github.com/t3hk0d3/go-loqed/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/t3hk0d3/go-loqed/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/t3hk0d3/go-loqed/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/t3hk0d3/go-loqed/releases/tag/v0.1.0
