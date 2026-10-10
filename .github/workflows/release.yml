@@ -121,7 +121,7 @@ jobs:
           # {{version}} drops the "v"; latest only for a final release.
           tags: type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
           flavor: latest=${{ needs.prepare.outputs.prerelease == 'false' }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: ${{ matrix.target }}
