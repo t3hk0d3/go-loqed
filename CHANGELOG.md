@@ -9,10 +9,6 @@ library are listed here. The format follows
 
 ### Fixed
 
-- The add-on docs and option description no longer suggest removing the LOQED
-  password after the first start: the add-on needs it to renew the token
-  before it expires (after about six months). Without it, a new token has to
-  be pasted manually.
 - After a lock command that got no response (it may have moved the lock),
   the state is marked stale, and a delayed bridge status still showing the
   old position no longer clears that: Home Assistant no longer shows, for
