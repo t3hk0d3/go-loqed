@@ -26,7 +26,7 @@ jobs:
         with:
           ref: master
           persist-credentials: false
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: loqed-mqtt/go.mod
           cache-dependency-path: loqed-mqtt/go.sum
