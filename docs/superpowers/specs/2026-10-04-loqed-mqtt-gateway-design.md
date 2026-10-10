@@ -378,7 +378,7 @@ Modes: `local`, `cloud`, `offline`.
 - Liveness: TCP connect to `bridge_ip:80` every `liveness_interval` (no HTTP request). Any received webhook also counts as liveness. TCP probe failures and HTTP failures are counted separately: a successful TCP probe resets only the probe counter, never the HTTP counter (a bridge that accepts TCP but hangs on HTTP must still fail over).
 - **Webhook delivery is confirmed, not assumed.** A successful registration only proves that the gateway reaches the bridge, not that the bridge reaches the gateway (a firewall or VLAN rule may block bridge → gateway). Delivery is *unconfirmed* on entering `local` and after every (re-)registration, and *confirmed* when a correctly signed bridge webhook arrives (deduplicated copies count). It becomes unconfirmed again, with a warning that bridge webhooks are not reaching the gateway and naming the webhook address and port to allow, when (a) a `/status` read shows a bolt state that differs from the current one although no bridge webhook arrived in the last `reconcile_interval`, or (b) a gateway command sent via the bridge ends its confirmation window without any bridge webhook having arrived since it was sent. While unconfirmed, `/status` is read every `liveness_interval` (local only, no cloud budget) and its bolt state is applied under the hint rules below; the warning is rate-limited (8).
 - `GET /status` only: on entering `local`; every `liveness_interval` while webhook delivery is unconfirmed; `WebhookConfirm` (30 s) after a command or after any `GO_TO_STATE_*` event if no `STATE_CHANGED_*` event reaching the target arrives, and once more 60 s later if still unresolved; after `MOTOR_STALL` (once, 30 s later); when `bolt_state` is `unknown` (at most once per 10 min); otherwise at most once per `reconcile_interval`. A failed `/status` marks state stale.
-- `/status` is a **hint** (2.1): its `bolt_state` is applied only if no webhook changed the bolt state in the last 5 min, or if it reports the expected target. A `/status` read within 3 min of a command or `GO_TO_STATE_*` that still shows the previous state is inconclusive: the bolt state is left unchanged and `state_stale` is set until a webhook or a later read resolves it. Battery and signal fields from `/status` are always applied.
+- `/status` is a **hint** (2.1): its `bolt_state` is applied only if no webhook changed the bolt state in the last 5 min, or if it reports the expected target. A `/status` read within 3 min of a command (sent, or failed with `no_response`/`rejected` after it may have been delivered) or `GO_TO_STATE_*` that still shows the previous state is inconclusive: the bolt state is left unchanged and `state_stale` is set until a webhook or a later read resolves it. Battery and signal fields from `/status` are always applied.
 - The bridge's webhook list is checked at registration; if it holds more than 3 other webhooks a warning explains that each webhook target delays events and `/status` (2.1).
 - Cloud webhook events (if configured) are an equal feed: they change state like bridge events; repeats are dropped (5.7).
 - 3 consecutive liveness failures, or 3 consecutive HTTP failures (`ErrUnreachable`/`ErrNoResponse`, 5 s timeout) → cache refresh rule 5. New IP → retry local. Same IP or refresh not possible → `cloud`. When the third failure is a command's local attempt, the refresh and the mode change run after that command resolves; the command's own cloud attempt (5.8) comes first.
@@ -487,6 +487,8 @@ CommandPipeline (internal/gateway)
         On ErrNoResponse or any non-2xx bridge answer other than unauthorized
             - never resends locally or via the cloud
             - publishes failed with error no_response or rejected
+            - sets state_stale, keeping the lock state, unless the lock already is in the target state
+            - treats a /status read within 3 min still showing the previous state as inconclusive (5.5)
             - still runs confirmation (webhooks, then the /status hint)
         On ErrUnauthorized
             - sends once via the cloud when possible
@@ -502,6 +504,7 @@ CommandPipeline (internal/gateway)
             - re-mints a minted token, or logs the configured token as unusable for commands
         On ErrNoResponse or 5xx
             - never resends
+            - sets state_stale and applies the /status hint rules like a bridge ErrNoResponse
             - schedules the confirmation poll
         On ErrRateLimited
             - publishes failed with error rate_limited

@@ -250,6 +250,7 @@ func (p *commandPipeline) attemptLocal(ctx context.Context, now time.Time, a *co
 		// The bridge may have acted (timeout after sending, reset, error
 		// status): never resend; the confirmation tells what happened.
 		a.written = true
+		p.mayHaveMoved(after, a)
 		p.fail(ctx, after, a, failClass(err), err)
 		p.watchFor(after, a)
 		s.awaitConfirm(after, a.target())
@@ -287,6 +288,7 @@ func (p *commandPipeline) attemptCloud(ctx context.Context, now time.Time, a *co
 	case class == model.FailNoResponse:
 		// The cloud may have acted: never resend, confirm instead.
 		a.written, a.via = true, model.ViaCloud
+		p.mayHaveMoved(after, a)
 		p.fail(ctx, after, a, class, err)
 		p.watchFor(after, a)
 		s.scheduleCloudConfirm(after, a.target())
@@ -321,6 +323,19 @@ func (p *commandPipeline) sent(now time.Time, a *command, via model.Via) {
 	}
 	p.publish(now, a)
 	s.publish()
+}
+
+// mayHaveMoved: a request that got no usable answer may have moved the
+// lock. Like a sent command it starts a movement, so a lagging /status still
+// showing the old state is inconclusive, and the published state, left
+// unchanged, is stale until something shows where the bolt is.
+func (p *commandPipeline) mayHaveMoved(now time.Time, a *command) {
+	s := p.s
+	if s.state.BoltState == a.target() {
+		return
+	}
+	s.startMovement(now, a.target())
+	s.markStale()
 }
 
 func (p *commandPipeline) watchFor(now time.Time, a *command) {
