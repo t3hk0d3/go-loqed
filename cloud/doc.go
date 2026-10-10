@@ -21,7 +21,8 @@
 // [Client.ListLocks] returns each lock with its cloud state and, when the
 // lock has a bridge, the bridge's IP address and keys
 // ([Lock.HasLocalCredentials]). Pass them to the bridge package to talk to
-// the lock locally.
+// the lock locally. The keys are [loqed.Secret] values: printing or logging
+// a Lock shows them as "[redacted]".
 //
 // # Commands
 //

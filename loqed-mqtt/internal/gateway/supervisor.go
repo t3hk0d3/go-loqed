@@ -253,7 +253,7 @@ func (s *Supervisor) BridgeKey() ([]byte, bool) {
 	if rec.BridgeKey == "" {
 		return nil, false
 	}
-	k, err := base64.StdEncoding.DecodeString(rec.BridgeKey)
+	k, err := base64.StdEncoding.DecodeString(rec.BridgeKey.Reveal())
 	return k, err == nil
 }
 

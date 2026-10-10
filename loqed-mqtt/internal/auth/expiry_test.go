@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/loqed-mqtt/internal/auth"
 	"github.com/t3hk0d3/go-loqed/loqed-mqtt/internal/store"
 )
@@ -99,7 +100,7 @@ func TestCheckExpiryRemintsMintedToken(t *testing.T) {
 	c := &clock{now: time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)}
 	st := newStore(t)
 	_ = st.Update(func(cc *store.Cache) {
-		cc.Minted = &store.MintedToken{ID: "x", Value: expiring(c, 13*24*time.Hour), EmailSHA256: store.EmailHash("me@example.com")}
+		cc.Minted = &store.MintedToken{ID: "x", Value: loqed.Secret(expiring(c, 13*24*time.Hour)), EmailSHA256: store.EmailHash("me@example.com")}
 	})
 	m := &fakeMinter{}
 	r := auth.NewResolver("", "me@example.com", m, st, c.Now, slog.New(slog.DiscardHandler))
@@ -117,7 +118,7 @@ func TestCheckExpiryMintFailureKeepsOldToken(t *testing.T) {
 	st := newStore(t)
 	old := expiring(c, 13*24*time.Hour)
 	_ = st.Update(func(cc *store.Cache) {
-		cc.Minted = &store.MintedToken{ID: "x", Value: old, EmailSHA256: store.EmailHash("me@example.com")}
+		cc.Minted = &store.MintedToken{ID: "x", Value: loqed.Secret(old), EmailSHA256: store.EmailHash("me@example.com")}
 	})
 	log, buf := logBuffer()
 	m := &fakeMinter{err: errors.New("portal down")}

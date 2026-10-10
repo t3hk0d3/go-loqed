@@ -77,9 +77,9 @@ type Lock struct {
 	BridgeHostname      string
 	BridgeMacWifi       string
 	LocalID             *int
-	KeySecret           string
-	BridgeKey           string
-	BackendKey          string
+	KeySecret           loqed.Secret
+	BridgeKey           loqed.Secret
+	BackendKey          loqed.Secret
 }
 
 // HasLocalCredentials reports whether the lock can be driven via its bridge.
@@ -107,9 +107,9 @@ type rawLock struct {
 	BridgeHostname      string          `json:"bridge_hostname"`
 	BridgeMacWifi       string          `json:"bridge_mac_wifi"`
 	LocalID             *loqed.Int      `json:"local_id"`
-	KeySecret           string          `json:"key_secret"`
-	BridgeKey           string          `json:"bridge_key"`
-	BackendKey          string          `json:"backend_key"`
+	KeySecret           loqed.Secret    `json:"key_secret"`
+	BridgeKey           loqed.Secret    `json:"bridge_key"`
+	BackendKey          loqed.Secret    `json:"backend_key"`
 }
 
 func (r rawLock) lock() Lock {

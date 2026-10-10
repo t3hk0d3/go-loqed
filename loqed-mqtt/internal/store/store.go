@@ -17,22 +17,23 @@ import (
 	"sync"
 	"time"
 
+	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/cloud"
 )
 
 const Version = 1
 
 type LockRecord struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	ModelName      string `json:"model_name"`
-	BridgeIP       string `json:"bridge_ip"`
-	BridgeHostname string `json:"bridge_hostname"` // informational only, never resolved
-	BridgeMacWifi  string `json:"bridge_mac_wifi"`
-	LocalID        *int   `json:"local_id"`
-	KeySecret      string `json:"key_secret"`
-	BridgeKey      string `json:"bridge_key"`
-	BackendKey     string `json:"backend_key"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	ModelName      string       `json:"model_name"`
+	BridgeIP       string       `json:"bridge_ip"`
+	BridgeHostname string       `json:"bridge_hostname"` // informational only, never resolved
+	BridgeMacWifi  string       `json:"bridge_mac_wifi"`
+	LocalID        *int         `json:"local_id"`
+	KeySecret      loqed.Secret `json:"key_secret"`
+	BridgeKey      loqed.Secret `json:"bridge_key"`
+	BackendKey     loqed.Secret `json:"backend_key"`
 	// CloudWebhookID is the cloud's numeric lock id, learned from the first
 	// cloud webhook on this lock's URL (the Lock API does not expose it).
 	CloudWebhookID string `json:"cloud_webhook_id,omitempty"`
@@ -84,10 +85,18 @@ func FromCloud(l cloud.Lock) LockRecord {
 
 // MintedToken is a token this gateway created via the portal.
 type MintedToken struct {
-	ID          string    `json:"id"`
-	Value       string    `json:"value"`
-	EmailSHA256 string    `json:"email_sha256,omitempty"` // account it belongs to (EmailHash)
-	MintedAt    time.Time `json:"minted_at"`
+	ID          string       `json:"id"`
+	Value       loqed.Secret `json:"value"`
+	EmailSHA256 string       `json:"email_sha256,omitempty"` // account it belongs to (EmailHash)
+	MintedAt    time.Time    `json:"minted_at"`
+}
+
+// String keeps Value redacted when a Cache is printed with %s: fmt prints
+// a nested pointer it cannot format with that verb without calling the
+// pointee's field methods.
+func (m MintedToken) String() string {
+	type plain MintedToken
+	return fmt.Sprintf("%+v", plain(m))
 }
 
 // BudgetState persists the cloud request window across restarts.
@@ -102,7 +111,7 @@ type Cache struct {
 	TokenSHA256  string       `json:"token_sha256,omitempty"`
 	Minted       *MintedToken `json:"minted_token,omitempty"`
 	LastMintAt   time.Time    `json:"last_mint_at,omitzero"` // includes failed attempts
-	CloudSecret  string       `json:"cloud_secret,omitempty"`
+	CloudSecret  loqed.Secret `json:"cloud_secret,omitempty"`
 	FetchedAt    time.Time    `json:"fetched_at"`
 	PublishedIDs []string     `json:"published_ids,omitempty"`
 	Budget       BudgetState  `json:"budget"`
@@ -172,10 +181,11 @@ func Open(path string) (*Store, Status, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: %w", err)
 	}
-	var c Cache
-	if json.Unmarshal(b, &c) != nil {
+	var f cacheFile
+	if json.Unmarshal(b, &f) != nil {
 		return s, StatusCorrupt, nil
 	}
+	c := f.cache()
 	if c.Version != Version {
 		return s, StatusUnknownVersion, nil
 	}
@@ -232,8 +242,65 @@ func (s *Store) InstallID() (string, error) {
 	return id, err
 }
 
+// cacheFile is the on-disk form of Cache. A loqed.Secret encodes to JSON as
+// loqed.Redacted, so the file spells the secrets out as plain strings; each
+// outer field hides the embedded field with the same JSON name.
+type cacheFile struct {
+	Cache
+	Minted      *mintedFile `json:"minted_token,omitempty"`
+	CloudSecret string      `json:"cloud_secret,omitempty"`
+	Locks       []lockFile  `json:"locks"`
+}
+
+type mintedFile struct {
+	MintedToken
+	Value string `json:"value"`
+}
+
+type lockFile struct {
+	LockRecord
+	KeySecret  string `json:"key_secret"`
+	BridgeKey  string `json:"bridge_key"`
+	BackendKey string `json:"backend_key"`
+}
+
+func toFile(c Cache) cacheFile {
+	f := cacheFile{Cache: c, CloudSecret: c.CloudSecret.Reveal()}
+	if c.Minted != nil {
+		f.Minted = &mintedFile{MintedToken: *c.Minted, Value: c.Minted.Value.Reveal()}
+	}
+	if c.Locks != nil {
+		f.Locks = make([]lockFile, len(c.Locks))
+	}
+	for i, r := range c.Locks {
+		f.Locks[i] = lockFile{LockRecord: r, KeySecret: r.KeySecret.Reveal(), BridgeKey: r.BridgeKey.Reveal(), BackendKey: r.BackendKey.Reveal()}
+	}
+	return f
+}
+
+func (f cacheFile) cache() Cache {
+	c := f.Cache
+	c.CloudSecret = loqed.Secret(f.CloudSecret)
+	c.Minted = nil
+	if f.Minted != nil {
+		m := f.Minted.MintedToken
+		m.Value = loqed.Secret(f.Minted.Value)
+		c.Minted = &m
+	}
+	c.Locks = nil
+	if f.Locks != nil {
+		c.Locks = make([]LockRecord, len(f.Locks))
+	}
+	for i, l := range f.Locks {
+		r := l.LockRecord
+		r.KeySecret, r.BridgeKey, r.BackendKey = loqed.Secret(l.KeySecret), loqed.Secret(l.BridgeKey), loqed.Secret(l.BackendKey)
+		c.Locks[i] = r
+	}
+	return c
+}
+
 func write(path string, c Cache) error {
-	b, err := json.MarshalIndent(c, "", "  ")
+	b, err := json.MarshalIndent(toFile(c), "", "  ")
 	if err != nil {
 		return err
 	}

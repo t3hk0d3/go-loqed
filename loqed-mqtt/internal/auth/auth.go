@@ -36,7 +36,7 @@ type PortalSession interface {
 type PortalMinter struct {
 	Login     func(ctx context.Context, email, password string) (PortalSession, error)
 	Email     string
-	Password  string
+	Password  loqed.Secret
 	TokenName string
 	Log       *slog.Logger
 }
@@ -50,7 +50,7 @@ func NewPortalMinter(c *portal.Client, email, password, tokenName string, log *s
 			}
 			return s, nil
 		},
-		Email: email, Password: password, TokenName: tokenName, Log: log,
+		Email: email, Password: loqed.Secret(password), TokenName: tokenName, Log: log,
 	}
 }
 
@@ -62,7 +62,7 @@ func TokenName(installID string) string { return "loqed-mqtt " + installID }
 // same name and logs out. Creating first means a failed create never
 // leaves the user without a working token.
 func (m *PortalMinter) Mint(ctx context.Context) (store.MintedToken, error) {
-	s, err := m.Login(ctx, m.Email, m.Password)
+	s, err := m.Login(ctx, m.Email, m.Password.Reveal())
 	if err != nil {
 		return store.MintedToken{}, err
 	}
@@ -152,7 +152,7 @@ func (r *Resolver) cachedLocked() string {
 	if r.emailHash != "" && m.EmailSHA256 != r.emailHash {
 		return "" // minted for a different account
 	}
-	return m.Value
+	return m.Value.Reveal()
 }
 
 func (r *Resolver) mintLocked(ctx context.Context) (string, error) {
@@ -180,5 +180,5 @@ func (r *Resolver) mintLocked(ctx context.Context) (string, error) {
 		r.log.Warn("could not save the new LOQED token", "err", err)
 	}
 	r.log.Info("created a LOQED personal access token", "token_id", tok.ID)
-	return tok.Value, nil
+	return tok.Value.Reveal(), nil
 }

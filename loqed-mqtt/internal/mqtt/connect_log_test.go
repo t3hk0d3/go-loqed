@@ -15,6 +15,7 @@ import (
 
 	"github.com/eclipse/paho.mqtt.golang/packets"
 
+	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/loqed-mqtt/internal/mqtt"
 	"github.com/t3hk0d3/go-loqed/loqed-mqtt/internal/testutil"
 )
@@ -30,7 +31,7 @@ const (
 func startFailingClient(t *testing.T, url string, user, pass string) *logBuffer {
 	t.Helper()
 	logs := &logBuffer{}
-	c := mqtt.NewClient(mqtt.ClientConfig{URL: url, Username: user, Password: pass, ClientID: "gw-" + t.Name(), Topics: topics},
+	c := mqtt.NewClient(mqtt.ClientConfig{URL: url, Username: user, Password: loqed.Secret(pass), ClientID: "gw-" + t.Name(), Topics: topics},
 		slog.New(slog.NewTextHandler(logs, nil)))
 	c.Start()
 	t.Cleanup(c.Close)

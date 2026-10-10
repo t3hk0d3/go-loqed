@@ -341,7 +341,7 @@ func TestEndToEnd(t *testing.T) {
 
 	// Cloud route: enriches the bridge event with the key name.
 	cloudBody := `{"requested_state":"NIGHT_LOCK","event_type":"STATE_CHANGED_NIGHT_LOCK","lock_id":6148,"key_local_id":"","key_name_user":"Hallway phone"}`
-	resp, err = http.Post("http://"+addr+"/cloud/"+cfg.Webhook.CloudSecret+"/lock1", "application/json", strings.NewReader(cloudBody))
+	resp, err = http.Post("http://"+addr+"/cloud/"+cfg.Webhook.CloudSecret.Reveal()+"/lock1", "application/json", strings.NewReader(cloudBody))
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("cloud webhook: %v %v", resp, err)
 	}

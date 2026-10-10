@@ -94,10 +94,10 @@ func Run(ctx context.Context, o Options) error {
 
 	var minter auth.Minter
 	if cfg.CanMint() {
-		minter = auth.NewPortalMinter(portal.New(portal.WithBaseURL(portalBase)), cfg.CloudEmail, cfg.CloudPassword,
+		minter = auth.NewPortalMinter(portal.New(portal.WithBaseURL(portalBase)), cfg.CloudEmail, cfg.CloudPassword.Reveal(),
 			auth.TokenName(installID), log)
 	}
-	resolver := auth.NewResolver(cfg.CloudToken, cfg.CloudEmail, minter, st, now, log)
+	resolver := auth.NewResolver(cfg.CloudToken.Reveal(), cfg.CloudEmail, minter, st, now, log)
 	var saveWarn sync.Once
 	budget := gateway.NewBudget(cfg.CloudBudget, budgetWindow, now, before.Budget, func(b store.BudgetState) {
 		if err := st.Update(func(c *store.Cache) { c.Budget = b }); err != nil {
@@ -550,17 +550,17 @@ func hostPort(base string) string {
 
 func ensureCloudSecret(cfg config.Config, st *store.Store) (string, error) {
 	if cfg.Webhook.CloudSecret != "" {
-		return cfg.Webhook.CloudSecret, nil
+		return cfg.Webhook.CloudSecret.Reveal(), nil
 	}
 	if s := st.Snapshot().CloudSecret; s != "" {
-		return s, nil
+		return s.Reveal(), nil
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	secret := base64.RawURLEncoding.EncodeToString(b)
-	if err := st.Update(func(c *store.Cache) { c.CloudSecret = secret }); err != nil {
+	if err := st.Update(func(c *store.Cache) { c.CloudSecret = loqed.Secret(secret) }); err != nil {
 		return "", fmt.Errorf("saving the cloud webhook secret: %w", err)
 	}
 	return secret, nil

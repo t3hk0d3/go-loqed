@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	loqed "github.com/t3hk0d3/go-loqed"
 )
 
 // decodeStrict decodes a node rejecting unknown fields; Node.Decode inside an
@@ -51,9 +53,9 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 }
 
 type Config struct {
-	CloudToken        string          `yaml:"cloud_token"`
+	CloudToken        loqed.Secret    `yaml:"cloud_token"`
 	CloudEmail        string          `yaml:"cloud_email"`
-	CloudPassword     string          `yaml:"cloud_password"`
+	CloudPassword     loqed.Secret    `yaml:"cloud_password"`
 	Locks             []string        `yaml:"locks"`
 	LockSettings      LockSettingsMap `yaml:"lock_settings"`
 	CachePath         string          `yaml:"cache_path"`
@@ -71,21 +73,21 @@ type Config struct {
 }
 
 type Webhook struct {
-	Listen      string `yaml:"listen"`
-	PrivateURL  string `yaml:"private_url"`
-	PublicURL   string `yaml:"public_url"`
-	CloudSecret string `yaml:"cloud_secret"`
+	Listen      string       `yaml:"listen"`
+	PrivateURL  string       `yaml:"private_url"`
+	PublicURL   string       `yaml:"public_url"`
+	CloudSecret loqed.Secret `yaml:"cloud_secret"`
 	// BridgeTimestampTolerance is the accepted age of a bridge webhook's
 	// TIMESTAMP; 0 turns the check off (not replaced by the default).
 	BridgeTimestampTolerance Duration `yaml:"bridge_timestamp_tolerance"`
 }
 
 type MQTT struct {
-	URL       string `yaml:"url"`
-	Username  string `yaml:"username"`
-	Password  string `yaml:"password"`
-	ClientID  string `yaml:"client_id"`
-	BaseTopic string `yaml:"base_topic"`
+	URL       string       `yaml:"url"`
+	Username  string       `yaml:"username"`
+	Password  loqed.Secret `yaml:"password"`
+	ClientID  string       `yaml:"client_id"`
+	BaseTopic string       `yaml:"base_topic"`
 	// CloudWebhooks accepts cloud webhook bodies on <base>/<id>/cloud_webhook.
 	CloudWebhooks bool `yaml:"cloud_webhooks"`
 	// BridgeWebhookControl accepts SetWebhooks requests on
@@ -100,11 +102,11 @@ type HomeAssistant struct {
 
 // LockSetting overrides cloud data for one lock (keyed by lock id or name).
 type LockSetting struct {
-	BridgeIP  string   `yaml:"bridge_ip"`
-	BridgeKey string   `yaml:"bridge_key"`
-	KeySecret string   `yaml:"key_secret"`
-	LocalID   *int     `yaml:"local_id"`
-	KeyNames  KeyNames `yaml:"key_names"`
+	BridgeIP  string       `yaml:"bridge_ip"`
+	BridgeKey loqed.Secret `yaml:"bridge_key"`
+	KeySecret loqed.Secret `yaml:"key_secret"`
+	LocalID   *int         `yaml:"local_id"`
+	KeyNames  KeyNames     `yaml:"key_names"`
 }
 
 // LockSettingsMap accepts a mapping (YAML) or a list of entries with a
@@ -352,7 +354,7 @@ func (c Config) Validate() error {
 		if s.BridgeIP != "" && net.ParseIP(s.BridgeIP) == nil {
 			add("lock_settings[%s].bridge_ip must be an IP address (hostnames are not resolved)", name)
 		}
-		for field, v := range map[string]string{"bridge_key": s.BridgeKey, "key_secret": s.KeySecret} {
+		for field, v := range map[string]string{"bridge_key": s.BridgeKey.Reveal(), "key_secret": s.KeySecret.Reveal()} {
 			if v == "" {
 				continue
 			}
