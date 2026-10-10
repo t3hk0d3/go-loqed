@@ -154,23 +154,27 @@ Other findings are folded into 2.1–2.3. Not adopted for v1 but recorded: an ap
 ## 3. Architecture
 
 ```
-go-loqed/                      module github.com/t3hk0d3/go-loqed
+go-loqed/                      module github.com/t3hk0d3/go-loqed (GoLoqed library, standard library only)
 ├── bridge/                    GoLoqed: local bridge client (stateless)
 ├── cloud/                     GoLoqed: cloud Lock API client + cloud webhook parsing (stateless)
 │   └── portal/                GoLoqed: Management API client (login, mint/list/revoke tokens)
-├── cmd/loqed-mqtt/            main: wiring only
-├── internal/
-│   ├── config/                config loading/validation, Supervisor MQTT lookup
-│   ├── store/                 credential cache (/data/locks.json), minted token, cloud webhook secret
-│   ├── gateway/               per-lock supervisors, failover, cloud budget
-│   ├── webhook/               HTTP listener, routing to supervisors, /healthz
-│   └── mqtt/                  MQTT client, topics, state/event/command_status publishing, command and cloud_webhook inputs
-│       └── hass/              Home Assistant discovery documents and topics
-├── Dockerfile
+├── internal/transport/        GoLoqed: HTTP send with ErrUnreachable/ErrNoResponse classification
+├── loqed-mqtt/                module github.com/t3hk0d3/go-loqed/loqed-mqtt (gateway; replace => ../)
+│   ├── cmd/loqed-mqtt/        main: wiring only
+│   └── internal/
+│       ├── config/            config loading/validation, Supervisor MQTT lookup
+│       ├── store/             credential cache (/data/locks.json), minted token, cloud webhook secret
+│       ├── gateway/           per-lock supervisors, failover, cloud budget
+│       ├── webhook/           HTTP listener, routing to supervisors, /healthz
+│       └── mqtt/              MQTT client, topics, state/event/command_status publishing, command and cloud_webhook inputs
+│           └── hass/          Home Assistant discovery documents and topics
+├── Dockerfile                 builds loqed-mqtt/ (context: the repository root)
 ├── docker-compose.yml
 ├── addon/                     HA add-on (config.yaml, DOCS.md, translations)
-└── .github/workflows/         test, lint, multi-arch image build
+└── .github/workflows/         test, lint (both modules), multi-arch image build
 ```
+
+The library and the gateway are separate Go modules (since 2026-10-10), so library users do not inherit the gateway's dependencies or Go version. Both share one version tag (`vX.Y.Z`); `internal/...` paths below are relative to `loqed-mqtt/`.
 
 The existing 2023 draft (`pkg/loqed_bridge_api`) is replaced; only its type/test ideas carry over. `go.mod` is bumped to the current stable Go release.
 

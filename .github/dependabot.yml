@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # Root module (library, stdlib only, must stay on go 1.22) and the gateway.
+  # Dependabot only raises a `go` directive when an updated dependency
+  # requires it; the root module has no requires, so it stays on 1.22.
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /loqed-mqtt
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      go-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps

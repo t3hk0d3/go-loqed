@@ -10,6 +10,9 @@ import (
 // WebhookKind classifies outgoing cloud webhooks.
 type WebhookKind int
 
+// Webhook kinds: the bolt reached a state (or MOTOR_STALL), the bolt started
+// moving (GO_TO_STATE_*), a battery/signal report, and an online/offline
+// report.
 const (
 	KindStateReached WebhookKind = iota + 1
 	KindGoToState

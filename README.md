@@ -1,9 +1,62 @@
 # go-loqed
 
+- **loqed-mqtt** (`loqed-mqtt/`): a local-first MQTT gateway for LOQED
+  locks with Home Assistant discovery and automatic cloud fallback. To
+  install it, see [Installation](#installation).
 - **GoLoqed** (`bridge`, `cloud`, `cloud/portal`): a Go client for the LOQED
-  local Bridge API, the cloud Lock API and the Integrations portal.
-- **loqed-mqtt** (`cmd/loqed-mqtt`): a local-first MQTT gateway for LOQED
-  locks with Home Assistant discovery and automatic cloud fallback.
+  local Bridge API, the cloud Lock API and the Integrations portal. See
+  [Go library](#go-library).
+
+## Go library
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/t3hk0d3/go-loqed.svg)](https://pkg.go.dev/github.com/t3hk0d3/go-loqed)
+
+    go get github.com/t3hk0d3/go-loqed
+
+The library needs Go 1.22 or newer and uses only the standard library; the
+gateway is a separate module, so none of its dependencies come along.
+
+```go
+ctx := context.Background()
+
+// A personal access token from https://integrations.loqed.com/personal-access-tokens
+// (or create one with cloud/portal from your email and password).
+locks, err := cloud.New(token).ListLocks(ctx) // at most 12 per 12 h: keep the result
+if err != nil { /* ... */ }
+l := locks[0] // check l.HasLocalCredentials() first
+
+b, err := bridge.New(l.BridgeIP, bridge.Credentials{
+	BridgeKey: l.BridgeKey, KeySecret: l.KeySecret, LocalKeyID: uint8(*l.LocalID),
+})
+if err != nil { /* ... */ }
+_ = b.CreateWebhook(ctx, "http://192.168.1.10:8099/loqed", bridge.AllTriggers)
+
+switch err := b.Command(ctx, bridge.ActionLock); {
+case err == nil: // received by the bridge; the webhooks confirm the move
+case errors.Is(err, loqed.ErrUnreachable): // never left: safe to send again
+case errors.Is(err, loqed.ErrNoResponse): // may have arrived: never resend
+}
+
+// In the handler for http://192.168.1.10:8099/loqed:
+ev, err := bridge.ParseEvent(b.BridgeKey(), body,
+	r.Header.Get("HASH"), r.Header.Get("TIMESTAMP"), time.Now())
+```
+
+Rules a caller must follow (the package documentation has the details and
+runnable examples):
+
+- A bridge answers every command with HTTP 200, even one the lock rejects.
+  Only its webhooks (`GO_TO_STATE_*` with your key id, then
+  `STATE_CHANGED_*`) confirm a command; `/status` lags.
+- Send a command again only after `loqed.ErrUnreachable`, never after
+  `loqed.ErrNoResponse`: the lock may already be moving, and a second
+  `OPEN` unlatches the door again.
+- An `http.Client` you pass in must disable keep-alives and must not follow
+  redirects.
+- LOQED blocks an account for 12 hours after more than 12 cloud status reads
+  (`ListLocks`) in 12 hours.
+- Bridges are addressed by IP address; hostnames are rejected. Cloud
+  webhooks are unsigned, so protect their URL with a secret.
 
 ## Why loqed-mqtt instead of the built-in integration
 
@@ -221,9 +274,24 @@ stay on the last release.
 
 ## Development
 
-    go test -race ./...
-    go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
-    python3 testdata/gen_vectors.py   # regenerate signing golden vectors
+The repository holds two Go modules that share one version tag (`vX.Y.Z`):
+
+- `github.com/t3hk0d3/go-loqed` at the root: the library (`loqed`,
+  `bridge`, `cloud`, `cloud/portal`), standard library only, Go 1.22+;
+- `github.com/t3hk0d3/go-loqed/loqed-mqtt` in `loqed-mqtt/`: the gateway.
+  Its `go.mod` replaces the library with `../`, so it always builds against
+  the library in the same checkout.
+
+`./...` stops at a module boundary, so run the checks in each module:
+
+    go test -race ./...                       # library
+    (cd loqed-mqtt && go test -race ./...)    # gateway
+    go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...   # in both, too
+    python3 testdata/gen_vectors.py           # regenerate signing golden vectors
+
+`docker build .` builds the gateway image from the repository root.
+
+Dependabot opens weekly update PRs for both Go modules, the GitHub Actions and the Docker base images (`.github/dependabot.yml`).
 
 ## License
 

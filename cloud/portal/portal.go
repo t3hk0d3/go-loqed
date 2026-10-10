@@ -1,7 +1,3 @@
-// Package portal drives the LOQED Integrations portal (the undocumented
-// "Management API"): log in with email/password and manage personal
-// access tokens. It scrapes a Laravel + Inertia web app; any change on
-// LOQED's side surfaces as loqed.ErrInvalidPayload.
 package portal
 
 import (
@@ -35,9 +31,16 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-func WithBaseURL(u string) Option               { return func(c *Client) { c.base = strings.TrimRight(u, "/") } }
+// WithBaseURL overrides DefaultBaseURL (for tests or proxies).
+func WithBaseURL(u string) Option { return func(c *Client) { c.base = strings.TrimRight(u, "/") } }
+
+// WithTransport sets the RoundTripper of every session's HTTP client
+// (default: http.DefaultTransport). Sessions always use their own cookie jar
+// and follow the portal's redirects themselves.
 func WithTransport(rt http.RoundTripper) Option { return func(c *Client) { c.transport = rt } }
 
+// New creates a portal client for DefaultBaseURL. It holds no session or
+// credentials; Login starts one.
 func New(opts ...Option) *Client {
 	c := &Client{base: DefaultBaseURL, timeout: 20 * time.Second}
 	for _, o := range opts {

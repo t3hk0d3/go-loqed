@@ -1,5 +1,7 @@
 .artifact/
-/loqed-mqtt
+/loqed-mqtt/loqed-mqtt
+go.work
+go.work.sum
 /dist/
 .env
 .env.local

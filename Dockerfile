@@ -2,10 +2,13 @@
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 ARG TARGETOS TARGETARCH TARGETVARIANT
 ARG VERSION=dev
-WORKDIR /src
-COPY go.mod go.sum ./
+# The gateway module (loqed-mqtt/) builds against the library at the
+# repository root through its replace directive, so the context is the root.
+WORKDIR /src/loqed-mqtt
+COPY go.mod /src/
+COPY loqed-mqtt/go.mod loqed-mqtt/go.sum ./
 RUN go mod download
-COPY . .
+COPY . /src
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/loqed-mqtt ./cmd/loqed-mqtt \
  && mkdir -p /out/data
