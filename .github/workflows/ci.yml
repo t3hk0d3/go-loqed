@@ -6,8 +6,44 @@ on:
 permissions:
   contents: read
 jobs:
+  # Both modules: the library at the root and the gateway in loqed-mqtt/
+  # (built against the library in this checkout through its replace).
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", loqed-mqtt]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: loqed-mqtt/go.mod
+          cache-dependency-path: loqed-mqtt/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Library uses only the standard library
+        if: matrix.module == '.'
+        run: test "$(go list -m all)" = github.com/t3hk0d3/go-loqed
+      - name: Changelog script tests
+        if: matrix.module == '.'
+        run: python3 .github/scripts/test_changelog.py
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+          working-directory: ${{ matrix.module }}
+  # The library's go directive is its minimum Go version: test it there.
+  library-min-go:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v5
         with:
@@ -15,13 +51,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: test -z "$(gofmt -l .)"
+          cache: false
+      - run: go version
       - run: go vet ./...
       - run: go test -race ./...
-      - run: python3 .github/scripts/test_changelog.py
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.14.0
   addon:
     runs-on: ubuntu-latest
     steps:
