@@ -376,6 +376,104 @@ func TestCommandWithoutResponseFallsBackToCloudConfirm(t *testing.T) {
 	}
 }
 
+// unlockWithoutResponse starts locked with confirmed webhook delivery and no
+// recent bolt webhook, then sends UNLOCK, whose bridge request gets no response.
+func (h *harness) unlockWithoutResponse() {
+	h.t.Helper()
+	h.bridge.status.BoltState = loqed.BoltNightLock
+	h.start()
+	h.send(BridgeEventMsg{Event: bridge.BatteryEvent{BatteryPercentage: 80}}) // delivery confirmed
+	h.run(10 * time.Minute)
+	h.bridge.commandErrs = []error{fmt.Errorf("%w: read timeout", loqed.ErrNoResponse)}
+	h.cmd(model.CommandUnlock, "")
+}
+
+func TestCommandWithoutResponseMarksStateStaleAtOnce(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.unlockWithoutResponse()
+	if s := h.state(); !s.StateStale || h.lock() != "LOCKED" || s.BoltState != loqed.BoltNightLock {
+		t.Fatalf("the lock may have moved, so its state is stale but unchanged: %+v lock %s", s, h.lock())
+	}
+	if st := h.lastStatus(); st.Status != model.StatusFailed || *st.Error != model.FailNoResponse {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestCommandWithoutResponseLaggingStatusStaysStale(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.unlockWithoutResponse()
+	reads := h.bridge.statusCalls
+	h.run(35 * time.Second) // the confirmation read still shows night_lock
+	if s := h.state(); h.bridge.statusCalls != reads+1 || !s.StateStale || h.lock() != "LOCKED" {
+		t.Fatalf("a lagging read must not be published as definite: reads %d %+v lock %s", h.bridge.statusCalls-reads, s, h.lock())
+	}
+	h.run(time.Minute) // the one recheck, still night_lock
+	if s := h.state(); h.bridge.statusCalls != reads+2 || !s.StateStale {
+		t.Fatalf("the recheck must run and keep the state stale: reads %d %+v", h.bridge.statusCalls-reads, s)
+	}
+	if len(h.bridge.commands) != 1 || len(h.cloud.commands) != 0 {
+		t.Fatalf("resent: bridge %v cloud %v", h.bridge.commands, h.cloud.commands)
+	}
+}
+
+func TestCommandWithoutResponseStatusShowingTargetApplies(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.unlockWithoutResponse()
+	h.bridge.status.BoltState = loqed.BoltDayLock
+	h.run(35 * time.Second)
+	if s := h.state(); s.StateStale || h.lock() != "UNLOCKED" || h.lastStatus().Status != model.StatusConfirmed {
+		t.Fatalf("state %+v lock %s status %+v", s, h.lock(), h.lastStatus())
+	}
+}
+
+func TestCommandWithoutResponseLateWebhookResolvesStale(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.unlockWithoutResponse()
+	h.run(35 * time.Second) // lagging read: stale
+	h.send(reached("STATE_CHANGED_LATCH", ourKey))
+	if s := h.state(); s.StateStale || h.lock() != "UNLOCKED" || h.lastStatus().Status != model.StatusConfirmed {
+		t.Fatalf("state %+v lock %s status %+v", s, h.lock(), h.lastStatus())
+	}
+}
+
+func TestCommandWithoutResponseAlreadyInTargetStaysFresh(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start() // day_lock
+	h.bridge.commandErrs = []error{loqed.ErrNoResponse}
+	h.cmd(model.CommandUnlock, "")
+	if s := h.state(); s.StateStale || h.lock() != "UNLOCKED" || h.s.move.active {
+		t.Fatalf("an UNLOCK cannot move an unlocked lock elsewhere: %+v lock %s", s, h.lock())
+	}
+}
+
+// A cloud command without response while the lock stays in local mode (the
+// bridge rejected the signature): a later lagging /status is inconclusive.
+func TestCloudCommandWithoutResponseInLocalModeLaggingStatusStaysStale(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.bridge.status.BoltState = loqed.BoltNightLock
+	h.start()
+	h.send(BridgeEventMsg{Event: bridge.BatteryEvent{BatteryPercentage: 80}})
+	h.run(10 * time.Minute)
+	h.bridge.commandErrs = []error{loqed.ErrUnauthorized}
+	h.cloud.commandErr = fmt.Errorf("%w: read timeout", loqed.ErrNoResponse)
+	h.cmd(model.CommandUnlock, "")
+	if h.s.mode != model.ModeLocal || len(h.cloud.commands) != 1 || *h.lastStatus().Error != model.FailNoResponse {
+		t.Fatalf("mode %s cloud %v status %+v", h.s.mode, h.cloud.commands, h.lastStatus())
+	}
+	if !h.state().StateStale || h.lock() != "LOCKED" {
+		t.Fatalf("state %+v lock %s", h.state(), h.lock())
+	}
+	h.advance(time.Minute)
+	h.statusRead() // still night_lock
+	if s := h.state(); !s.StateStale || h.lock() != "LOCKED" {
+		t.Fatalf("a lagging read must not be published as definite: %+v lock %s", s, h.lock())
+	}
+	h.send(reached("STATE_CHANGED_LATCH", ourKey))
+	if s := h.state(); s.StateStale || h.lock() != "UNLOCKED" {
+		t.Fatalf("a late webhook resolves it: %+v lock %s", s, h.lock())
+	}
+}
+
 func TestBridgeAuthErrorUsesCloudThenRefreshes(t *testing.T) {
 	h := newHarness(t, testRecord(), config.LockSetting{})
 	h.start()
