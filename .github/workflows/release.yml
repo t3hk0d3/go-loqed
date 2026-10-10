@@ -28,8 +28,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-      - run: go test -race ./...
+          go-version-file: loqed-mqtt/go.mod
+          cache-dependency-path: loqed-mqtt/go.sum
+      - name: Test the library
+        run: go test -race ./...
+      - name: Test the gateway
+        working-directory: loqed-mqtt
+        run: go test -race ./...
       - run: python3 .github/scripts/test_changelog.py
   prepare:
     needs: test
