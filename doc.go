@@ -44,8 +44,9 @@
 // Lock keys and token values are [Secret]s (cloud.Lock's KeySecret,
 // BridgeKey and BackendKey, bridge.Credentials, portal.Token.Value). A
 // non-empty Secret shows as [Redacted] ("[redacted]") wherever it is
-// printed: every fmt verb, log/slog (text and JSON handlers), and also as a
-// field of a struct or an element of a slice. Encoding it to JSON emits
+// printed: every fmt verb, log/slog (text and JSON handlers), and also as an
+// exported field of a struct or an element of a slice (fmt cannot redact a
+// Secret held in an unexported field). Encoding it to JSON emits
 // "[redacted]" too, so to store a secret, write [Secret.Reveal] (or
 // string(s)) into your own field. Decoding JSON into a Secret keeps the
 // real value.
