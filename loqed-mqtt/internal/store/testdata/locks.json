@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "install_id": "0a1b2c3d",
+  "token_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "minted_token": {
+    "id": "42",
+    "value": "FAKE-MINTED-TOKEN",
+    "email_sha256": "b4c9a289323b21a01c3e940f150eb9b8c542587f1abfd8f0e1cc1ffc5e475514",
+    "minted_at": "2026-10-04T12:00:00Z"
+  },
+  "last_mint_at": "2026-10-04T12:00:00Z",
+  "cloud_secret": "FAKE-CLOUD-WEBHOOK-SECRET",
+  "fetched_at": "2026-10-04T12:00:00Z",
+  "published_ids": [
+    "lock1"
+  ],
+  "budget": {
+    "calls": [
+      "2026-10-04T12:00:00Z"
+    ]
+  },
+  "locks": [
+    {
+      "id": "lock1",
+      "name": "Front door",
+      "model_name": "LOQED Touch",
+      "bridge_ip": "192.0.2.10",
+      "bridge_hostname": "LOQED-aabbccddeeff.local",
+      "bridge_mac_wifi": "aa:bb:cc:dd:ee:ff",
+      "local_id": 2,
+      "key_secret": "RkFLRS1LRVktU0VDUkVU",
+      "bridge_key": "RkFLRS1CUklER0UtS0VZ",
+      "backend_key": "RkFLRS1CQUNLRU5ELUtFWQ==",
+      "cloud_webhook_id": "1234"
+    }
+  ]
+}

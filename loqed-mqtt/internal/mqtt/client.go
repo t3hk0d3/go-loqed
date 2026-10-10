@@ -22,13 +22,14 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/eclipse/paho.mqtt.golang/packets"
 
+	loqed "github.com/t3hk0d3/go-loqed"
 	"github.com/t3hk0d3/go-loqed/loqed-mqtt/internal/model"
 )
 
 type ClientConfig struct {
 	URL      string
 	Username string
-	Password string
+	Password loqed.Secret
 	ClientID string
 	Topics   Topics
 	// Discovery publishes Home Assistant discovery; nil disables it.
@@ -140,7 +141,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		AddBroker(cfg.URL).
 		SetClientID(cfg.ClientID).
 		SetUsername(cfg.Username).
-		SetPassword(cfg.Password).
+		SetPassword(cfg.Password.Reveal()).
 		SetCleanSession(true).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).

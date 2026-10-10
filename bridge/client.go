@@ -23,8 +23,8 @@ const DefaultTimeout = 5 * time.Second
 
 // Credentials are the per-lock secrets from the cloud lock list.
 type Credentials struct {
-	BridgeKey  string // base64; webhook management and incoming webhook signatures
-	KeySecret  string // base64; signs lock commands
+	BridgeKey  loqed.Secret // base64; webhook management and incoming webhook signatures
+	KeySecret  loqed.Secret // base64; signs lock commands
 	LocalKeyID uint8
 }
 
@@ -63,11 +63,11 @@ func New(host string, creds Credentials, opts ...Option) (*Client, error) {
 	if !validHost(host) {
 		return nil, fmt.Errorf("bridge: %q is not an IP address or IP:port", host)
 	}
-	bk, err := base64.StdEncoding.DecodeString(creds.BridgeKey)
+	bk, err := base64.StdEncoding.DecodeString(creds.BridgeKey.Reveal())
 	if err != nil {
 		return nil, fmt.Errorf("bridge: invalid bridge key: %w", err)
 	}
-	ks, err := base64.StdEncoding.DecodeString(creds.KeySecret)
+	ks, err := base64.StdEncoding.DecodeString(creds.KeySecret.Reveal())
 	if err != nil {
 		return nil, fmt.Errorf("bridge: invalid key secret: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+
+	loqed "github.com/t3hk0d3/go-loqed"
 )
 
 const (
@@ -73,7 +75,7 @@ func ResolveMQTT(ctx context.Context, c *Config, supervisorToken, supervisorURL 
 	}
 	c.MQTT.URL = scheme + "://" + net.JoinHostPort(host, strconv.Itoa(out.Data.Port))
 	if c.MQTT.Username == "" {
-		c.MQTT.Username, c.MQTT.Password = out.Data.Username, out.Data.Password
+		c.MQTT.Username, c.MQTT.Password = out.Data.Username, loqed.Secret(out.Data.Password)
 	}
 	return nil
 }

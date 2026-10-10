@@ -20,6 +20,11 @@ library are listed here. The format follows
   newer. Import paths are unchanged. The gateway moved to the
   `github.com/t3hk0d3/go-loqed/loqed-mqtt` module; images and the add-on
   are unchanged.
+- Library: the lock keys (`cloud.Lock.KeySecret`, `BridgeKey`, `BackendKey`,
+  `bridge.Credentials.BridgeKey`, `KeySecret`) and `portal.Token.Value` are
+  now of type `loqed.Secret`. It prints, logs and encodes to JSON as
+  `[redacted]`; `Reveal()` (or `string(s)`) returns the value. Decoding is
+  unchanged.
 
 ### Fixed
 
@@ -34,6 +39,9 @@ library are listed here. The format follows
   nothing. Repeats of the same reason are logged at most every 10 minutes
   with a count, and the next successful connect reports how many attempts
   failed.
+- Lock keys, tokens and passwords no longer show up in full when a lock,
+  its credentials or the settings are printed or logged; they appear as
+  `[redacted]`. The credential cache (`/data/locks.json`) is unchanged.
 
 ## [0.2.0] - 2026-10-08
 

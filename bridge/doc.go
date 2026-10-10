@@ -15,6 +15,9 @@
 //     key's id, which the bridge reports back in webhooks
 //     (KeyLocalID), so you can tell your own commands apart.
 //
+// The keys are loqed.Secret values, so printing or logging Credentials
+// shows them as "[redacted]".
+//
 // [Client.Status] works without credentials.
 //
 // # Commands are confirmed only by webhooks

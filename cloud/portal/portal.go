@@ -59,7 +59,10 @@ type Session struct {
 
 // Token is a newly created personal access token. Value is only available
 // at creation time.
-type Token struct{ ID, Name, Value string }
+type Token struct {
+	ID, Name string
+	Value    loqed.Secret
+}
 
 // TokenInfo is a listed token (no value).
 type TokenInfo struct{ ID, Name string }
@@ -138,7 +141,7 @@ func (s *Session) CreateToken(ctx context.Context, name string) (Token, error) {
 	if value == "" {
 		return Token{}, fmt.Errorf("%w: portal did not return the new token", loqed.ErrInvalidPayload)
 	}
-	tok := Token{Name: name, Value: value}
+	tok := Token{Name: name, Value: loqed.Secret(value)}
 	for _, t := range props.Tokens {
 		if t.Name == name && !known[string(t.ID)] {
 			tok.ID = string(t.ID)

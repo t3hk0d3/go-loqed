@@ -38,4 +38,15 @@
 // arrived: resend only when the answer says it was rejected (for example
 // [ErrUnauthorized]). A retry is a new call; bridge.Client.Command signs
 // every call afresh and never replays a request.
+//
+// # Secrets
+//
+// Lock keys and token values are [Secret]s (cloud.Lock's KeySecret,
+// BridgeKey and BackendKey, bridge.Credentials, portal.Token.Value). A
+// non-empty Secret shows as [Redacted] ("[redacted]") wherever it is
+// printed: every fmt verb, log/slog (text and JSON handlers), and also as a
+// field of a struct or an element of a slice. Encoding it to JSON emits
+// "[redacted]" too, so to store a secret, write [Secret.Reveal] (or
+// string(s)) into your own field. Decoding JSON into a Secret keeps the
+// real value.
 package loqed

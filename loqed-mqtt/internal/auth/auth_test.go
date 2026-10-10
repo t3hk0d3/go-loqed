@@ -24,7 +24,7 @@ func (m *fakeMinter) Mint(context.Context) (store.MintedToken, error) {
 	if m.err != nil {
 		return store.MintedToken{}, m.err
 	}
-	return store.MintedToken{ID: "id", Value: "minted-" + string(rune('0'+m.calls))}, nil
+	return store.MintedToken{ID: "id", Value: loqed.Secret("minted-" + string(rune('0'+m.calls)))}, nil
 }
 
 func newStore(t *testing.T) *store.Store {
