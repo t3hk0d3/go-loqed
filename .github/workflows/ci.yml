@@ -35,7 +35,7 @@ jobs:
       - name: Changelog script tests
         if: matrix.module == '.'
         run: python3 .github/scripts/test_changelog.py
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
           working-directory: ${{ matrix.module }}
