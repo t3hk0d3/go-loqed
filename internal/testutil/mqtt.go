@@ -18,6 +18,32 @@ import (
 // StartBroker runs a mochi broker on a free localhost port.
 func StartBroker(t *testing.T) string {
 	t.Helper()
+	return startBroker(t, new(auth.AllowHook), nil)
+}
+
+// StartBrokerWithAuth runs a broker that accepts only username/password.
+func StartBrokerWithAuth(t *testing.T, username, password string) string {
+	t.Helper()
+	ledger := &auth.Ledger{Auth: auth.AuthRules{
+		{Username: auth.RString(username), Password: auth.RString(password), Allow: true},
+	}}
+	return startBroker(t, new(auth.Hook), &auth.Options{Ledger: ledger})
+}
+
+// ClosedPortURL returns a broker URL on a localhost port nothing listens on.
+func ClosedPortURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return "tcp://" + addr
+}
+
+func startBroker(t *testing.T, hook mqttserver.Hook, config any) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +51,7 @@ func StartBroker(t *testing.T) string {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	srv := mqttserver.New(nil)
-	if err := srv.AddHook(new(auth.AllowHook), nil); err != nil {
+	if err := srv.AddHook(hook, config); err != nil {
 		t.Fatal(err)
 	}
 	// mochi v2.6+: NewTCP(listeners.Config). If the signature differs, check `go doc github.com/mochi-mqtt/server/v2/listeners NewTCP`.

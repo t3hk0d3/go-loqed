@@ -17,6 +17,13 @@ library are listed here. The format follows
   bridge. A device that takes over the bridge's IP address can no longer
   bounce signed lock commands or webhook changes to another host; a redirect
   now fails the request, and a lock command that got one is not sent again.
+- loqed-mqtt now logs a warning when it cannot connect to the MQTT broker,
+  naming the broker (without credentials), the reason (connection refused,
+  bad username or password, timeout, TLS, ...) and which settings to check.
+  Before, a wrong `mqtt.url` or password, or a broker that was down, logged
+  nothing. Repeats of the same reason are logged at most every 10 minutes
+  with a count, and the next successful connect reports how many attempts
+  failed.
 
 ## [0.2.0] - 2026-10-08
 
