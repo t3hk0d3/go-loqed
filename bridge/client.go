@@ -1,4 +1,3 @@
-// Package bridge is a stateless client for the LOQED Bridge local HTTP API.
 package bridge
 
 import (

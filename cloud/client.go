@@ -1,5 +1,3 @@
-// Package cloud is a stateless client for the LOQED cloud Lock API
-// (https://integrations.production.loqed.com/api).
 package cloud
 
 import (

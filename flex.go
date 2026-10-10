@@ -13,6 +13,7 @@ import (
 // leaves the value unchanged. Use *Int to tell null/absent apart from zero.
 type Int int64
 
+// UnmarshalJSON implements json.Unmarshaler.
 func (i *Int) UnmarshalJSON(b []byte) error {
 	s, null, err := scalarText(b)
 	if err != nil || null {
@@ -41,6 +42,7 @@ func (i *Int) UnmarshalJSON(b []byte) error {
 // leaves the value unchanged.
 type Float float64
 
+// UnmarshalJSON implements json.Unmarshaler.
 func (f *Float) UnmarshalJSON(b []byte) error {
 	s, null, err := scalarText(b)
 	if err != nil || null {
@@ -61,6 +63,7 @@ func (f *Float) UnmarshalJSON(b []byte) error {
 // Bool decodes true/false, 1/0 and their string forms.
 type Bool bool
 
+// UnmarshalJSON implements json.Unmarshaler. Any other value is an error.
 func (v *Bool) UnmarshalJSON(b []byte) error {
 	s, null, err := scalarText(b)
 	if err != nil || null {
@@ -80,6 +83,7 @@ func (v *Bool) UnmarshalJSON(b []byte) error {
 // String decodes a JSON string, number or boolean as text.
 type String string
 
+// UnmarshalJSON implements json.Unmarshaler; null leaves the value unchanged.
 func (v *String) UnmarshalJSON(b []byte) error {
 	s, null, err := scalarText(b)
 	if err != nil || null {
@@ -117,6 +121,8 @@ type KeyID struct {
 	valid bool
 }
 
+// UnmarshalJSON implements json.Unmarshaler. It fails only for a JSON
+// object or array; every scalar decodes (as "no key" when out of range).
 func (k *KeyID) UnmarshalJSON(b []byte) error {
 	s, null, err := scalarText(b)
 	if err != nil {

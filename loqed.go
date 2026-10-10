@@ -1,8 +1,3 @@
-// Package loqed holds types shared by the GoLoqed clients: errors,
-// lenient JSON scalars and the lock bolt state.
-//
-// Clients live in subpackages: bridge (local Bridge API), cloud (cloud
-// Lock API) and cloud/portal (Integrations portal / Management API).
 package loqed
 
 import (
@@ -12,6 +7,8 @@ import (
 // BoltState is the physical position of the lock bolt.
 type BoltState string
 
+// Bolt states. BoltUnknown covers anything LOQED reports that is not one of
+// the three positions, including a lock that is offline or jammed.
 const (
 	BoltUnknown   BoltState = "unknown"
 	BoltOpen      BoltState = "open"
