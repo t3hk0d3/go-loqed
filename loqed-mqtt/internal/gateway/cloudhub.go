@@ -107,6 +107,9 @@ func (h *CloudHub) Locks(ctx context.Context, p Priority, notBefore time.Time) (
 	started := h.now()
 	locks, err := listLocks(ctx, api)
 	if errors.Is(err, loqed.ErrUnauthorized) {
+		// LOQED does not count reads it rejects (spec 2.5, V12), so neither
+		// do we: a wrong token must not lock the gateway out for 12 h.
+		h.budget.Refund()
 		api, rerr := h.reauth(ctx, tok)
 		if rerr != nil {
 			return LockList{}, errors.Join(err, rerr)
@@ -114,6 +117,9 @@ func (h *CloudHub) Locks(ctx context.Context, p Priority, notBefore time.Time) (
 		if err = h.budget.Take(p); err == nil {
 			started = h.now()
 			locks, err = listLocks(ctx, api)
+			if errors.Is(err, loqed.ErrUnauthorized) {
+				h.budget.Refund()
+			}
 		}
 	}
 	if errors.Is(err, loqed.ErrRateLimited) {

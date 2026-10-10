@@ -214,3 +214,37 @@ func TestHubResetTokenResolvesAgain(t *testing.T) {
 		t.Fatalf("err %v fresh %d token %q", err, fresh.commands, h.Token())
 	}
 }
+
+// LOQED does not count reads it rejects as unauthenticated (spec 2.5, V12), so
+// a wrong token must not use up the budget, e.g. in a restart loop.
+func TestHubRejectedReadsCostNoBudget(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	errs := make([]error, 30)
+	for i := range errs {
+		errs[i] = loqed.ErrUnauthorized
+	}
+	api := &scriptedAPI{errs: errs}
+	h := newHub(&now, &fakeTokens{token: "bad"}, map[string]*scriptedAPI{"bad": api})
+	for range 15 {
+		if _, err := h.Locks(context.Background(), PriorityConfirm, time.Time{}); !errors.Is(err, loqed.ErrUnauthorized) {
+			t.Fatalf("got %v", err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if api.calls != 15 || h.Budget().Remaining() != 10 {
+		t.Fatalf("calls %d, budget left %d; want 15 calls and the full budget", api.calls, h.Budget().Remaining())
+	}
+}
+
+func TestHubChargesOnlyTheReadThatSucceedsAfterReauth(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	old := &scriptedAPI{errs: []error{loqed.ErrUnauthorized}}
+	fresh := &scriptedAPI{}
+	h := newHub(&now, &fakeTokens{token: "old", next: "new"}, map[string]*scriptedAPI{"old": old, "new": fresh})
+	if _, err := h.Locks(context.Background(), PriorityRefresh, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if h.Budget().Remaining() != 9 {
+		t.Fatalf("budget left %d, want 9", h.Budget().Remaining())
+	}
+}

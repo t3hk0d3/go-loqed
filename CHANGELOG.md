@@ -13,6 +13,10 @@ library are listed here. The format follows
   the state is marked stale, and a delayed bridge status still showing the
   old position no longer clears that: Home Assistant no longer shows, for
   example, a definite "locked" for a door that was unlocked.
+- A wrong LOQED token no longer uses up the cloud request budget. LOQED
+  does not count requests it rejects, but the gateway did, so a few restarts
+  with a mistyped token could keep it out of the cloud for up to 12 hours
+  after the token was fixed.
 
 ## [0.3.0] - 2026-10-10
 
