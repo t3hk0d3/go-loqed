@@ -11,6 +11,13 @@ library are listed here. The format follows
 
 - The project is now licensed under the GNU AGPL v3.0 or later.
 
+### Fixed
+
+- Security hardening: the gateway no longer follows HTTP redirects from the
+  bridge. A device that takes over the bridge's IP address can no longer
+  bounce signed lock commands or webhook changes to another host; a redirect
+  now fails the request, and a lock command that got one is not sent again.
+
 ## [0.2.0] - 2026-10-08
 
 ### Changed
