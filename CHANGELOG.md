@@ -10,6 +10,16 @@ library are listed here. The format follows
 ### Added
 
 - The project is now licensed under the GNU AGPL v3.0 or later.
+- Library: package documentation (authentication, the safety rules for
+  commands and retries, rate limits, concurrency) and runnable examples.
+
+### Changed
+
+- Library: the Go library (`github.com/t3hk0d3/go-loqed`) is now its own
+  module, without the gateway's dependencies, and works with Go 1.22 and
+  newer. Import paths are unchanged. The gateway moved to the
+  `github.com/t3hk0d3/go-loqed/loqed-mqtt` module; images and the add-on
+  are unchanged.
 
 ### Fixed
 

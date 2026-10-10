@@ -33,6 +33,9 @@ const (
 // Bit order matches the bridge's flag bitmap.
 type Triggers uint32
 
+// Webhook triggers, one per trigger_* flag of the bridge: the bolt reached
+// a state (StateChanged*), started moving (Goto*), a battery report or a
+// signal (online) report.
 const (
 	TriggerStateChangedOpen Triggers = 1 << iota
 	TriggerStateChangedLatch
