@@ -44,7 +44,9 @@ type Option func(*Client)
 
 // WithHTTPClient replaces the default client. The injected client must set
 // DisableKeepAlives on its transport, otherwise net/http may silently replay
-// a GET (a signed lock command) on a reused connection.
+// a GET (a signed lock command) on a reused connection, and must not follow
+// redirects (CheckRedirect returning http.ErrUseLastResponse): following one
+// re-sends the signed request to wherever the answering host points it.
 func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.hc = hc } }
 
 // WithClock overrides the time source used to sign requests and check webhooks.
@@ -72,9 +74,15 @@ func New(host string, creds Credentials, opts ...Option) (*Client, error) {
 	}
 	c := &Client{
 		base: "http://" + host,
-		// Fresh connection per request, so net/http never silently replays a
-		// GET (a signed lock command) on a reused connection.
-		hc:        &http.Client{Timeout: DefaultTimeout, Transport: &http.Transport{DisableKeepAlives: true}},
+		hc: &http.Client{
+			Timeout: DefaultTimeout,
+			// Fresh connection per request, so net/http never silently
+			// replays a GET (a signed lock command) on a reused connection.
+			Transport: &http.Transport{DisableKeepAlives: true},
+			// The bridge never redirects; following one would re-send the
+			// signed request to another host.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		now:       time.Now,
 		bridgeKey: bk,
 		keySecret: ks,
@@ -135,5 +143,18 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, heade
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return transport.Do(c.hc, req)
+	resp, respBody, err := transport.Send(c.hc, req)
+	if err != nil {
+		return nil, err
+	}
+	// The bridge never redirects. A redirect is still an answer, so it must
+	// not look unreachable or unauthorized (both let a command be sent
+	// again); its body and Location may point anywhere and are dropped.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, &loqed.APIError{StatusCode: resp.StatusCode, Body: "unexpected redirect"}
+	}
+	if err := transport.CheckStatus(resp.StatusCode, respBody); err != nil {
+		return nil, err
+	}
+	return respBody, nil
 }
