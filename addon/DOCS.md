@@ -11,7 +11,8 @@ to the LOQED cloud when the bridge is unreachable.
    https://integrations.loqed.com/personal-access-tokens and paste it into
    **Personal access token**. Alternatively, enter your LOQED email and
    password; the add-on then creates a token named `loqed-mqtt <id>`
-   (the password can be removed after the first successful start).
+   (keep the password set: the add-on uses it to renew the token before it
+   expires, after about six months).
 3. Start the add-on. Each lock appears as a device with:
    - a lock entity and a lock event entity;
    - battery and signal sensors;
