@@ -157,9 +157,16 @@ func TestRemovedLockCommandStatusIsCleared(t *testing.T) {
 	sub.WaitFor(t, wait, func(m testutil.Message) bool { return m.Topic == "loqed/gone/command_status" && len(m.Payload) == 0 })
 }
 
-func TestRedactURL(t *testing.T) {
-	if got := mqtt.RedactURL("tcp://user:s3cret@broker:1883"); got != "tcp://user:xxxxx@broker:1883" {
-		t.Fatalf("got %q", got)
+func TestBrokerAddrDropsCredentialsPathAndQuery(t *testing.T) {
+	for in, want := range map[string]string{
+		"tcp://user:s3cret@broker:1883":          "tcp://broker:1883",
+		"wss://u:p@broker:443/mqtt?token=s3cret": "wss://broker:443",
+		"ssl://broker":                           "ssl://broker",
+		"::not a url":                            "<unparsable URL>",
+	} {
+		if got := mqtt.BrokerAddr(in); got != want {
+			t.Errorf("BrokerAddr(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

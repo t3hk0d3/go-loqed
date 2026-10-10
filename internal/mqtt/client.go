@@ -2,18 +2,25 @@ package mqtt
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
+	"github.com/eclipse/paho.mqtt.golang/packets"
 
 	"github.com/t3hk0d3/go-loqed/internal/model"
 )
@@ -97,6 +104,10 @@ type Client struct {
 	hookLists map[string][]byte   // by real lock id
 	avail     map[string]string   // by real lock id
 	downSince time.Time           // zero while connected
+	// failedConnects counts failed connect attempts since the last success;
+	// connWarned rate-limits their warnings per reason.
+	failedConnects int
+	connWarned     map[string]*connWarn
 
 	// retainMu serializes "update cache + publish" for retained per-lock
 	// topics with the reconnect republish, so an older document can never
@@ -105,6 +116,16 @@ type Client struct {
 }
 
 const publishTimeout = 5 * time.Second
+
+// connWarnWindow: repeats of the same connect failure within this window are
+// only counted and reported with the next warning (like the gateway's
+// rate-limited warnings).
+const connWarnWindow = 10 * time.Minute
+
+type connWarn struct {
+	last       time.Time
+	suppressed int
+}
 
 func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 	c := &Client{cfg: cfg, log: log, commands: make(chan Command, 16), webhooks: make(chan CloudWebhook, 16),
@@ -131,10 +152,15 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		SetOrderMatters(true).
 		SetWill(cfg.Topics.Status(), "offline", 1, true).
 		SetOnConnectHandler(func(paho.Client) {
-			c.mu.Lock()
-			c.downSince = time.Time{}
-			c.mu.Unlock()
+			c.onConnected()
 			go c.onConnect()
+		}).
+		// Fired after every failed connect or reconnect attempt; without it a
+		// wrong mqtt.url or password would only show as silence.
+		SetConnectionNotificationHandler(func(_ paho.Client, n paho.ConnectionNotification) {
+			if f, ok := n.(paho.ConnectionNotificationFailed); ok {
+				c.onConnectFailed(f.Reason)
+			}
 		}).
 		SetConnectionLostHandler(func(_ paho.Client, err error) {
 			c.mu.Lock()
@@ -294,9 +320,83 @@ func (c *Client) publish(topic string, retain bool, payload []byte) error {
 	return tok.Error()
 }
 
+// onConnected records a successful connect and logs it, with the number of
+// failed attempts before it.
+func (c *Client) onConnected() {
+	c.mu.Lock()
+	c.downSince = time.Time{}
+	failed := c.failedConnects
+	c.failedConnects = 0
+	c.connWarned = nil
+	c.mu.Unlock()
+	args := []any{"broker", BrokerAddr(c.cfg.URL)}
+	if failed > 0 {
+		args = append(args, "failed_attempts", failed)
+	}
+	c.log.Info("connected to MQTT broker", args...)
+}
+
+// onConnectFailed warns about a failed connect attempt. It logs only the
+// reason class, never the error: errors may carry the broker URL.
+func (c *Client) onConnectFailed(err error) {
+	reason, check := connectFailure(err)
+	now := c.now()
+	c.mu.Lock()
+	c.failedConnects++
+	w := c.connWarned[reason]
+	if w != nil && now.Sub(w.last) < connWarnWindow {
+		w.suppressed++
+		c.mu.Unlock()
+		return
+	}
+	args := []any{"broker", BrokerAddr(c.cfg.URL), "reason", reason, "check", check}
+	if w != nil && w.suppressed > 0 {
+		args = append(args, "repeated", w.suppressed)
+	}
+	if c.connWarned == nil {
+		c.connWarned = map[string]*connWarn{}
+	}
+	c.connWarned[reason] = &connWarn{last: now}
+	c.mu.Unlock()
+	c.log.Warn("cannot connect to MQTT broker; retrying", args...)
+}
+
+// connectFailure classifies a paho connect error into a reason and the
+// settings to check.
+func connectFailure(err error) (reason, check string) {
+	var (
+		dnsErr   *net.DNSError
+		netErr   net.Error
+		recErr   tls.RecordHeaderError
+		alertErr tls.AlertError
+		verErr   *tls.CertificateVerificationError
+		authErr  x509.UnknownAuthorityError
+		hostErr  x509.HostnameError
+		certErr  x509.CertificateInvalidError
+	)
+	switch {
+	case errors.Is(err, packets.ErrorRefusedBadUsernameOrPassword), errors.Is(err, packets.ErrorRefusedNotAuthorised):
+		return "not authorized (bad username or password)", "mqtt.username and mqtt.password"
+	case errors.Is(err, packets.ErrorRefusedIDRejected):
+		return "client id rejected", "mqtt.client_id"
+	case errors.As(err, &recErr), errors.As(err, &alertErr), errors.As(err, &verErr),
+		errors.As(err, &authErr), errors.As(err, &hostErr), errors.As(err, &certErr):
+		return "TLS", "mqtt.url (tcp:// or ssl://, host name) and the broker certificate"
+	case errors.As(err, &dnsErr):
+		return "host not found", "the host in mqtt.url"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused", "mqtt.url (host and port) and that the broker is running"
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout", "mqtt.url and that the broker is reachable"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET):
+		return "connection closed by broker", "mqtt.url (port, tcp:// or ssl://) and the broker log"
+	default:
+		return "other", "mqtt.url, mqtt.username and mqtt.password"
+	}
+}
+
 func (c *Client) onConnect() {
 	t := c.cfg.Topics
-	c.log.Info("connected to MQTT broker", "url", RedactURL(c.cfg.URL))
 	// Subscribe before publishing anything: paho runs this handler before it
 	// resumes its message store on a reconnect, and a QoS 1 publish made in
 	// that window races with the resume (paho v1.5.1). The subscription round
@@ -348,13 +448,14 @@ func (c *Client) waitSubscribe(topic string, tok paho.Token) {
 	}
 }
 
-// RedactURL hides a password embedded in a broker URL.
-func RedactURL(raw string) string {
+// BrokerAddr reduces a broker URL to scheme://host:port, dropping any
+// credentials, path and query.
+func BrokerAddr(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return "<unparsable URL>"
 	}
-	return u.Redacted()
+	return u.Scheme + "://" + u.Host
 }
 
 // publishDiscovery publishes discovery for current locks and clears the
