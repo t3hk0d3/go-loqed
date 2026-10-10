@@ -291,6 +291,8 @@ The repository holds two Go modules that share one version tag (`vX.Y.Z`):
 
 `docker build .` builds the gateway image from the repository root.
 
+Dependabot opens weekly update PRs for both Go modules, the GitHub Actions and the Docker base images (`.github/dependabot.yml`).
+
 ## License
 
 Copyright (C) 2026 Igor Yamolov. Licensed under the GNU Affero General Public
