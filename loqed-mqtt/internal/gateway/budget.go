@@ -100,6 +100,18 @@ func (b *Budget) Take(p Priority) error {
 	return nil
 }
 
+// Refund gives back the latest call, for a read LOQED rejected as
+// unauthenticated: those do not count toward its limit (spec 2.5, V12).
+// Callers must not take concurrently (CloudHub serializes reads).
+func (b *Budget) Refund() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := len(b.calls); n > 0 {
+		b.calls = b.calls[:n-1]
+		b.persistLocked()
+	}
+}
+
 func (b *Budget) Block(d time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

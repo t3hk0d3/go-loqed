@@ -118,3 +118,28 @@ func TestBudgetClampsFutureTimestamps(t *testing.T) {
 		t.Fatalf("block must be clamped to 12h: %v", err)
 	}
 }
+
+func TestBudgetRefundGivesBackTheLatestCall(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	var saved store.BudgetState
+	b := NewBudget(3, 12*time.Hour, func() time.Time { return now }, store.BudgetState{}, func(s store.BudgetState) { saved = s })
+	_ = b.Take(PriorityConfirm)
+	now = now.Add(time.Minute)
+	_ = b.Take(PriorityConfirm)
+	b.Refund()
+	if b.Remaining() != 2 {
+		t.Fatalf("remaining %d, want 2", b.Remaining())
+	}
+	if len(saved.Calls) != 1 || !saved.Calls[0].Equal(now.Add(-time.Minute)) {
+		t.Fatalf("refund not persisted or wrong call removed: %+v", saved.Calls)
+	}
+}
+
+func TestBudgetRefundWithoutCallsDoesNothing(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	b := newBudget(3, &now)
+	b.Refund()
+	if b.Remaining() != 3 {
+		t.Fatalf("remaining %d, want 3", b.Remaining())
+	}
+}

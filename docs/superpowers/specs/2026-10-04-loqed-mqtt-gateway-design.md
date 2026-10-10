@@ -132,6 +132,7 @@ Inertia JSON is obtained by sending `X-Inertia: true` and `X-Inertia-Version` (f
 - V9 (new): whether deleted key slots stay deleted across token re-mints; the exact stale-timestamp tolerance of the lock.
 - V10 (rev 2.2): the Home Assistant relay end to end: a webhook trigger reached through its Nabu Casa URL receives LOQED's JSON body as `trigger.json`; the documented action republishes it unchanged (valid JSON, numbers kept as numbers); the gateway applies the event.
 - V11 (rev 2.4): `GET /webhooks` on current firmware returns the nine `trigger_*` fields per entry, as 0/1 numbers or numeric strings, and they match the flags the webhook was created with (read-only check against the real bridge); whether the bridge limits the number of webhooks.
+- V12 (rev 2.5): whether `GET /api/locks/` requests answered with 401 count toward the 12-per-12 h limit or are throttled.
 
 These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged until each has a recorded outcome.
 
@@ -148,6 +149,7 @@ These are tracked as the final task of the gateway plan; `v1.0.0` is not tagged 
 | V7 | ✅ after the `remember: false` fix: no 2FA, meta CSRF, create → list → revoke → logout and re-mint all work |
 | V8 | open |
 | V11 | ✅ 2026-10-08: `GET /webhooks` returns `id` (number), `url` and all nine `trigger_*` fields as numbers 0/1 for each entry (2 entries, both created with all triggers). Partial trigger sets and a webhook count limit are not verified; tests cover both number and numeric-string values |
+| V12 | ✅ 2026-10-10: 213 `GET /api/locks/` with a made-up bearer token within about 6 min (up to ~106 per minute) were all answered 401 `{"message":"Unauthenticated."}`, with no 429 and no rate-limit headers. Rejected reads are neither throttled nor attributable to an account, so the gateway does not count them (5.6). A typo of a real token, or a revoked one, was not tested |
 
 Other findings are folded into 2.1–2.3. Not adopted for v1 but recorded: an app.loqed.com "API-Config" JSON key (`lock_id`, `lock_key_local_id`, `lock_key_key`, `backend_key`, `bridge_key`, `bridge_ip`) also works, with cloud status via `app.loqed.com/API/lock_status.php` and self-signed cloud commands via `app.loqed.com/API/lock_command.php`; it needs one key per lock, so the per-account Integrations API stays primary.
 
@@ -400,7 +402,7 @@ Modes: `local`, `cloud`, `offline`.
 
 ### 5.6 Cloud request budget
 
-Account-wide rolling window shared by all locks and cache refreshes: at most `cloud_budget` (default 10, max 12) `GET /api/locks/` calls per rolling 12 h. One `ListLocks` call serves all locks; results are shared for 30 s, except for confirmation polls, which only accept data fetched after the command. Spend priority and reserves: (1) post-command confirmation may use the whole budget; (2) cache refresh leaves 1 call; (3) background state polls leave 2 and are spaced `12h / cloud_budget` apart. Budget is taken only when a request is actually sent (not while no token is available). Background polls are skipped while cloud webhooks are configured and at least one was received in the last `reconcile_interval`; then only one reconcile poll per `reconcile_interval` is made. When exhausted, state is published unchanged with `state_stale: true`. On `ErrRateLimited`, suspend all cloud reads for 12 h and log at error level.
+Account-wide rolling window shared by all locks and cache refreshes: at most `cloud_budget` (default 10, max 12) `GET /api/locks/` calls per rolling 12 h. One `ListLocks` call serves all locks; results are shared for 30 s, except for confirmation polls, which only accept data fetched after the command. Spend priority and reserves: (1) post-command confirmation may use the whole budget; (2) cache refresh leaves 1 call; (3) background state polls leave 2 and are spaced `12h / cloud_budget` apart. Budget is taken only when a request is actually sent (not while no token is available), and given back when LOQED answers it with 401 (V12): a wrong token in a restart loop must not lock the gateway out of the cloud for 12 h. Background polls are skipped while cloud webhooks are configured and at least one was received in the last `reconcile_interval`; then only one reconcile poll per `reconcile_interval` is made. When exhausted, state is published unchanged with `state_stale: true`. On `ErrRateLimited`, suspend all cloud reads for 12 h and log at error level.
 
 The window (call timestamps) and the 12 h block are persisted in the cache after every change and restored at startup (timestamps in the future are clamped to now), so crash loops and restarts cannot exceed the account limit. Cloud command calls are outside the budget: LOQED's limit applies to status reads only (V2, 2.5). Each cloud command is logged at info.
 
