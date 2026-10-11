@@ -50,8 +50,14 @@ flowchart LR
         D["dispatch effects"]
     end
 
+    subgraph Bus["Output bus (on the loop)"]
+        F{{"facts<br/>LockStateChanged · CommandStatusChanged ·<br/>LockEventOccurred · Log · …"}}
+        SM["MQTT publisher"]
+        SD["Directory<br/>(health, bridge keys)"]
+        SL["Logger"]
+    end
+
     subgraph Exec["Executor"]
-        INL["inline: MQTT publish,<br/>log"]
         GO["goroutine per effect:<br/>bridge · cloud · probe ·<br/>token · store"]
     end
 
@@ -64,37 +70,43 @@ flowchart LR
     R --> L1 & L2 & A
     L1 & L2 & A --> D
     D -- "routed effects<br/>(lock ↔ account)" --> R
-    D --> INL
-    D --> GO
+    D -- "facts" --> F
+    F --> SM & SD & SL
+    D -- "I/O effects" --> GO
     GO -- "result events" --> RES
-    INL --> BROKER[("MQTT broker")]
+    SM --> BROKER[("MQTT broker")]
     GO --> NET[("bridge · LOQED cloud ·<br/>portal · /data")]
 ```
 
 - **Edges** turn outside input into events and put them on the inbox without blocking (full inbox → `ErrBusy`, as today's per-lock queue).
 - The **loop** stamps each event with the current time, routes it to one reducer, and dispatches the returned effects in order.
 - **Reducers** (`lock.Model`, `account.Model`) are deterministic: `(model, now, event) → model', effects`. No I/O, no clock, no goroutines, no logger.
-- **Routed effects** are messages between reducers (a lock asks the account for a cloud read; the account answers). The loop delivers them as events in the same dispatch round, so they never touch the executor.
-- The **executor** runs I/O effects. Fast, ordered ones (MQTT publishes, log lines) run inline; network and disk work runs in a goroutine per effect and comes back as a result event.
+- Reducers return three kinds of output, in one ordered list:
+    - **Routed effects** are messages between reducers (a lock asks the account for a cloud read; the account answers). The loop delivers them as events in the same dispatch round.
+    - **Facts** say what happened (`LockStateChanged`, `CommandStatusChanged`, `LockEventOccurred`, `Log`, …). The loop hands each fact to the **output bus**, whose subscribers (MQTT publisher, Directory, logger) turn it into output. Reducers know nothing about MQTT, topics or logging (§5.4).
+    - **I/O effects** ask for work with an answer (bridge, cloud, probes, token, store). The **executor** runs each in a goroutine and its result comes back as an event.
 
 ## 5. Core types and packages
 
 ```
-loqed-mqtt/internal/engine/            loop, Event/Effect plumbing, Directory (edge snapshot), Program API
+loqed-mqtt/internal/engine/            loop, Event/Effect plumbing, Directory (edge snapshot, a bus subscriber), Program API
+loqed-mqtt/internal/engine/bus/        output bus: Fact dispatch to subscribers
+loqed-mqtt/internal/engine/out/        output subscribers: MQTT publisher, logger
 loqed-mqtt/internal/engine/lock/       per-lock reducer (one file per state group, see §6)
 loqed-mqtt/internal/engine/account/    account reducer: budget, shared reads, token, cloud commands, refresh
-loqed-mqtt/internal/engine/effect/     effect and result-event types shared by reducers and executor
-loqed-mqtt/internal/engine/exec/       executor: bridge/cloud/probe/token/store/MQTT adapters
+loqed-mqtt/internal/engine/effect/     event, effect and fact types shared by reducers, bus, subscribers and executor
+loqed-mqtt/internal/engine/exec/       executor: bridge/cloud/probe/token/store adapters
 ```
 
-Dependency direction: `lock`, `account` → `effect`, `model`, `store` (types only), library types. `exec` → `effect`, library clients, `auth`, `store`, and the `Publisher` interface (satisfied by `*mqtt.Client`). `engine` → all of them. `lock` and `account` never import each other, `exec`, `mqtt` or `auth`.
+Dependency direction: `lock`, `account` → `effect`, `model`, `store` (types only), library types. `exec` → `effect`, library clients, `auth`, `store`. `out` → `effect`, `model`, and its own `Publisher` interface (satisfied by `*mqtt.Client`; `internal/mqtt` imports nothing from the engine). `engine` → all of them. `lock` and `account` never import each other, `bus`, `out`, `exec`, `mqtt` or `auth`.
 
 ### 5.1 Contracts (signatures, not code)
 
 | Name | Shape | Notes |
 |---|---|---|
 | `effect.Event` | marker interface | Every input to a reducer. Result events carry the `Ref` of the effect that caused them. |
-| `effect.Effect` | marker interface | Either `Routed` (has `Target() Address`) or I/O (executed). |
+| `effect.Effect` | marker interface | `Routed` (has `Target() Address`), `effect.Fact` (to the bus) or I/O (executed). |
+| `effect.Fact` | marker interface (embeds `Effect`) | Something that happened; carries data only, never a topic, payload format or log handler. |
 | `effect.Ref` | `struct{ Lock string; Seq uint64 }` | Unique per effect; the reducer that emitted an effect keeps its `Ref` to match the result. |
 | `effect.Address` | `Account` or `Lock(id)` or `Program` | Destination of a routed effect. |
 | `lock.Model` | struct, state groups in §6 | `New(rec store.LockRecord, env Env) *Model` |
@@ -105,7 +117,11 @@ Dependency direction: `lock`, `account` → `effect`, `model`, `store` (types on
 | `(*account.Model).Update` / `Due` | as for `lock.Model` | |
 | `engine.Program` | loop + models + executor | `New(Options)`, `Run(ctx)`, `Submit(Event) error`, `AddLocks([]store.LockRecord)`, `Await(ctx, ref) (Event, error)` (startup only), `Directory() *Directory` |
 | `engine.Directory` | concurrency-safe snapshot for edges | `BridgeKey(id)`, `BindCloudID(id, cloudID) error`, `Health() map[string]Health`, `Known(id) bool` |
-| `exec.Executor` | `Run(ctx, effect.Effect)` | Inline or goroutine; results go to the loop's results channel. |
+| `bus.Bus` | `Subscribe(Subscriber)` before `Run`; `Publish(effect.Fact)` (loop only) | Synchronous, in registration order. |
+| `bus.Subscriber` | `Handle(f effect.Fact)` | Picks the fact types it cares about, ignores the rest. |
+| `out.MQTT` | `New(p Publisher, log *slog.Logger, opts Options) *MQTT` | Subscriber: facts → MQTT topics (§5.4). |
+| `out.Logger` | `New(log *slog.Logger) *Logger` | Subscriber: `Log` facts → `slog`. |
+| `exec.Executor` | `Run(ctx, effect.Effect)` | One goroutine per I/O effect; results go to the loop's results channel. |
 
 **Why mutate in place.** Go has no persistent data structures; copying a model with slices and maps on every event is error-prone. `Update` mutates the model it is called on and nothing else, so it is still a deterministic function of (model, now, event) and tests can snapshot and compare models.
 
@@ -129,8 +145,8 @@ dispatch(event):
         effects := target(ev).Update(now, ev)
         for each effect in order:
             if routed → push back to queue as event
-            else      → executor.Run(effect)               // inline publishes keep effect order
-    refresh Directory health snapshot if any lock's Health changed
+            if fact   → bus.Publish(fact)                  // every subscriber, before the next effect
+            else      → executor.Run(effect)               // goroutine; result comes back later
 ```
 
 - The heartbeat keeps today's 1 s cadence, so a schedule a reducer forgot to report in `Due()` is late by at most 1 s. `Due()` exists for sub-second schedules (local command retries after 0.5 s).
@@ -139,12 +155,7 @@ dispatch(event):
 
 ### 5.3 Effect catalogue
 
-**Inline I/O** (on the loop, in order):
-
-| Effect | Performed by | Bound |
-|---|---|---|
-| `PublishState{Ref, Lock, State}`, `PublishAvailability`, `PublishEvent`, `PublishCommandStatus`, `PublishWebhooks`, `PublishWebhooksResult` | `Publisher` (`*mqtt.Client`) | Handoff inline, never waits for PUBACK; bounded by `WriteTimeout` 2 s. The outcome comes back later as `PublishDone` (§8.3). |
-| `Log{Level, Msg, Attrs}` | `slog` | — |
+**Facts** go to the output bus (§5.4).
 
 **Asynchronous I/O** (goroutine; result event back):
 
@@ -161,7 +172,6 @@ dispatch(event):
 | `SaveBudget{Ref, State}` (account) | `BudgetSaved{Ref, Err}` | disk |
 | `MergeLocks{Ref, Locks, TokenHash}` (account) | `LocksMerged{Ref, Records, Removed, Err}` | disk |
 | `SaveCloudID{Lock, ID}` (Directory) | none (failure logged by the executor) | disk |
-| (outcome of any `Publish*` above) | `PublishDone{Ref, Kind, Err}`; `Kind` names the topic kind (state, event, availability, command_status, webhooks, webhooks_result), never the payload | `PublishTimeout` 30 s → `ErrPublishTimeout` |
 
 **Routed** (between reducers, no I/O):
 
@@ -177,6 +187,36 @@ dispatch(event):
 | `TokenChanged{Expiry, Known}` | account → every lock | For `token_expires_at` in the state document. |
 | `LocksRemoved{IDs}` | account → program | Stop those locks, clear their retained topics. |
 
+### 5.4 Facts and the output bus
+
+Reducers report what happened as facts; subscribers decide what that means for the outside world. Adding an output (metrics, a second broker, a debug feed) is a new subscriber, with no reducer change.
+
+| Fact | Emitted when (today's call) | Subscribers |
+|---|---|---|
+| `LockStateChanged{Lock, State, Available}` | wherever `Supervisor.publish()` runs today, also when nothing changed (the retained topics are re-sent as today) | MQTT: retained `state` and `availability`; Directory: health |
+| `LockEventOccurred{Lock, Event}` | a lock event or `command_failed` (`PublishEvent`) | MQTT: `event` |
+| `CommandStatusChanged{Lock, Status}` | each command status update | MQTT: retained `command_status` |
+| `WebhookListChanged{Lock, List}` | the bridge webhook list was read | MQTT: retained `webhooks` |
+| `WebhooksResultReady{Lock, Result}` | a SetWebhooks request ended | MQTT: `webhooks/result` |
+| `CredentialsChanged{Lock, BridgeKey}` | `Start`, `RecordChanged` | Directory: bridge key for webhook verification |
+| `Log{Lock, Level, Msg, Attrs}` | any reducer, including its rate-limited warnings | Logger |
+
+Rules:
+
+- **On the loop, in order.** `bus.Publish` calls every subscriber synchronously, in registration order (MQTT, Directory, Logger), before the loop handles the next effect. A lock's facts therefore reach every subscriber in the order its reducer produced them, so Home Assistant never sees `locked` before the `moving` that preceded it.
+- **One-way.** Subscribers never call back into the program or a reducer. A subscriber that one day must tell the reducers something submits an ordinary edge event through the inbox; none does in this design.
+- **Bounded.** A subscriber must return quickly. The MQTT publisher hands a message to paho and returns: bounded by `WriteTimeout` 2 s on a stuck socket, once per broken connection (§8.3). Everything slower runs in the subscriber's own goroutines.
+- **No secrets.** Facts carry the same data the topics carry today. `Log` attributes follow the existing no-secrets rules; the logger subscriber adds nothing.
+
+**MQTT publisher** (`out.MQTT`):
+
+- Maps each fact to today's `Publisher` call (`LockStateChanged` → `PublishState` then `PublishAvailability`, and so on). Topics, payloads and retain flags are unchanged.
+- Never waits for PUBACK. For each publish it starts a goroutine that waits for the paho token (`Done()`, `PublishTimeout` 30 s, or shutdown). On an error (not connected, handoff timeout, connection lost, `ErrPublishTimeout`) it logs a rate-limited warning `publishing <kind> failed`, naming the topic kind, never the payload. An optional `OnOutcome(lock, kind, err)` hook is the place for later metrics. Outcomes never reach the reducers: no transition depends on a PUBACK.
+- The outcome goroutines are not slot-bounded; each ends at PUBACK, on a paho error or after 30 s.
+- Publishes the MQTT client makes on its own (discovery, the reconnect republish, removed-lock cleanup, the answer to an undelivered SetWebhooks request) stay in `internal/mqtt` and `internal/app`, as today.
+
+**Directory** keeps the `/healthz` snapshot from `LockStateChanged` (mode, availability, last event) and the bridge keys from `CredentialsChanged`, behind its own mutex for the HTTP goroutines.
+
 ## 6. Lock reducer (`engine/lock`)
 
 The `Supervisor` fields become named groups. Each group lives in its own file with the functions that change it; `Update` is a switch on the event type that calls into the groups.
@@ -185,7 +225,7 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 |---|---|
 | `identity` (`model.go`) | id, record with lock settings applied, setting, token expiry |
 | `conn` (`mode.go`) | mode, failure counters (probe, HTTP, cloud probe, cloud API), schedules (`nextProbe`, `nextCloudProbe`, `nextReconcile`, `nextCloudPoll`, `nextOfflineRetry`, `lastUnknownCheck`), `bridgeUsable` |
-| `doc` (`state.go`) | published `model.State`, `lastFreshAt`, `lastEventAt`, `lastPollAt`, `lastCloudEventAt`, `lastBoltEventAt`, health |
+| `doc` (`state.go`) | published `model.State`, `lastFreshAt`, `lastEventAt`, `lastPollAt`, `lastCloudEventAt`, `lastBoltEventAt` |
 | `confirm` (`confirm.go`) | confirmation target/timers, cloud confirmation, retried/rechecked flags, `movement` |
 | `delivery` (`delivery.go`) | bridge webhook delivery: `webhookConfirmed`, `lastBridgeEventAt`, `nextUnconfirmedRead`, bridge check |
 | `registration` (`register.go`) | `webhookOK`, `nextWebhookRetry`, the registration job |
@@ -206,9 +246,8 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 | `Command{Command, ID, At}` | MQTT | `cmds.Submit` (§6.3). |
 | `WebhooksRequest{Body}` | MQTT | SetWebhooks (gateway 5.9). |
 | `RecordChanged{Record}` | account | Replace the record, bump `recordGen`, recompute `bridgeUsable`. |
-| `TokenChanged` | account | Store expiry; next state publish carries it. |
+| `TokenChanged` | account | Store expiry; the next `LockStateChanged` carries it. |
 | result events (§5.3) and `ReadResult`, `CommandResult`, `RefreshResult` | executor / account | Matched by `Ref` to the waiting operation (§6.2). |
-| `PublishDone{Kind, Err}` | executor | No state change. On an error: a rate-limited warning `publishing <kind> failed` (today's per-call warnings). Nothing waits for it: no transition depends on a PUBACK. |
 
 ### 6.2 I/O slots and operations
 
@@ -226,7 +265,7 @@ Today's call chains (`tryEnterLocal` → status → `registerWebhook` → list �
 `engine/lock/pipeline.go` keeps today's rules (gateway 5.8): latest command wins, one pending slot, deadlines (LOCK/UNLOCK 30 s, OPEN 10 s from MQTT arrival), local cutoff (10 s, OPEN 3 s, before the deadline), local backoff 0.5 s / 1 s / 2 s, one cloud attempt, retry only after `ErrUnreachable` (or no usable bridge) or `ErrUnauthorized`, never after `ErrNoResponse` or any answer. What changes is that an attempt is now two steps: **emit** and **result**.
 
 - **In flight counts as written for superseding.** While an attempt's effect is in flight, the request may reach the lock, so a newer command waits in `pending` exactly as behind a written command. If the result is `ErrUnreachable` (provably not sent) and a newer command is pending, the older command is superseded instead of retried and the pending one becomes active.
-- **COR M1.** The reducer decides an attempt only with `now < cutoff` (local) or `now < deadline` (cloud), at the moment it emits the effect, after the `sending` status publish that precedes it in the same effect list. The effect carries an absolute deadline: local `min(now + RequestTimeout, cutoff)`, cloud `deadline`. The executor checks the deadline again when its goroutine starts and returns `ErrNotAttempted` without dialing if it has passed; the account checks it again before it emits `CloudCommand` (a token may have had to be resolved first). `ErrNotAttempted` is provably not sent: the reducer treats it like a deadline found passed before the attempt (`expired` for the cloud attempt, fall through to the cloud for a local one past its cutoff).
+- **COR M1.** The reducer decides an attempt only with `now < cutoff` (local) or `now < deadline` (cloud), at the moment it emits the effect, after the `sending` `CommandStatusChanged` fact that precedes it in the same output list. The effect carries an absolute deadline: local `min(now + RequestTimeout, cutoff)`, cloud `deadline`. The executor checks the deadline again when its goroutine starts and returns `ErrNotAttempted` without dialing if it has passed; the account checks it again before it emits `CloudCommand` (a token may have had to be resolved first). `ErrNotAttempted` is provably not sent: the reducer treats it like a deadline found passed before the attempt (`expired` for the cloud attempt, fall through to the cloud for a local one past its cutoff).
 - **A result after the deadline** of a request that started in time is applied as today: a 2xx is `sent`, `ErrNoResponse` is `no_response` with confirmation, a cloud result after the local mode was left still confirms by poll.
 
 ```mermaid
@@ -257,6 +296,7 @@ sequenceDiagram
     autonumber
     participant MQ as MQTT edge
     participant L as lock.Model
+    participant O as Output bus
     participant X as Executor
     participant B as Bridge
     participant A as account.Model
@@ -264,7 +304,7 @@ sequenceDiagram
 
     MQ->>L: Command{OPEN, At=t0}
     Note over L: deadline t0+10s, cutoff t0+7s
-    L->>X: PublishCommandStatus(sending, attempts=1) (inline)
+    L->>O: CommandStatusChanged(sending, attempts=1) → MQTT
     L->>X: BridgeCommand(deadline=min(now+5s, cutoff))
     X->>B: POST /to_lock?command=open (signed now)
     B--xX: connection refused
@@ -273,14 +313,14 @@ sequenceDiagram
     L->>X: BridgeCommand (attempt 2..n, each signed afresh)
     X->>L: BridgeCommandDone(ErrUnreachable)
     Note over L: next retry would pass cutoff → cloud
-    L->>X: PublishCommandStatus(sending, attempts=n+1)
+    L->>O: CommandStatusChanged(sending, attempts=n+1)
     L->>A: CommandRequest(target=open, deadline=t0+10s)
     A->>X: CloudCommand(token, deadline) — only if now < deadline
     X->>C: bolt_state=open
     C-->>X: 200
     X->>A: CloudCommandDone(nil)
     A->>L: CommandResult(nil)
-    L->>X: PublishCommandStatus(sent, via=cloud), PublishState(moving)
+    L->>O: CommandStatusChanged(sent, via=cloud), LockStateChanged(moving)
     Note over L: cloud confirmation read at +5 s (ReadRequest, Priority=Confirm, NotBefore=sent time)
 ```
 
@@ -305,7 +345,7 @@ The mode transitions and their side conditions stay as in gateway 5.5. The `Tick
 - **Event feed** (`eventfeed.go`): moved unchanged.
 - **Webhook registration** (`register.go`): an operation with steps list → delete stale (one effect each) → create → re-read; a 401 on any step issues a `RefreshRequest` and retries the job once with the new record (today's `registerWebhook`). Not started while a SetWebhooks job runs.
 - **SetWebhooks** (`setwebhooks.go`): the job already is a step machine; its bridge calls go through the bridge slot and never start while a command is busy (unchanged rule). `planWebhooks` and `webhookRevision` move unchanged with their tests.
-- **Warnings**: `Log` effects; the reducer keeps today's rate-limit state, so tests can assert both the line and the `repeated` count.
+- **Warnings**: `Log` facts; the reducer keeps today's rate-limit state, so tests can assert both the line and the `repeated` count.
 
 ## 7. Account reducer (`engine/account`)
 
@@ -393,7 +433,7 @@ Unbudgeted and never queued behind reads: a `CommandRequest` waits only for a to
 
 ### 8.1 Goroutines and contexts
 
-- One goroutine per asynchronous effect, with a context derived from the program context and the effect's deadline or timeout. No pools: in-flight effects are bounded by the slots in §6.2 and §7 (per lock: one bridge call, two probes, one read request, one refresh; account: one read, one token operation, one store write of each kind, the cloud commands in flight). Publish-outcome goroutines are not slot-bounded but each ends at PUBACK, on a paho error or after 30 s.
+- One goroutine per asynchronous effect, with a context derived from the program context and the effect's deadline or timeout. No pools: in-flight effects are bounded by the slots in §6.2 and §7 (per lock: one bridge call, two probes, one read request, one refresh; account: one read, one token operation, one store write of each kind, the cloud commands in flight).
 - `ErrNotAttempted`: before dialing a command (bridge or cloud), the goroutine checks its absolute deadline.
 - Results are sent to the loop's results channel; on shutdown they are dropped.
 
@@ -401,13 +441,14 @@ Unbudgeted and never queued behind reads: a `CommandRequest` waits only for a to
 
 The executor builds a `*bridge.Client` per lock and `recordGen` on first use (pure construction, as `NewBridge` today) and keeps one per lock. As defence in depth it serializes bridge calls per lock with a mutex; the reducer's bridge slot should make it uncontended, and a test asserts that it never is.
 
-### 8.3 MQTT publishing
+### 8.3 MQTT client changes (`internal/mqtt`)
+
+The executor does no MQTT work; publishing is the `out.MQTT` subscriber's job (§5.4). The client changes it relies on:
 
 - `SetWriteTimeout(2 * time.Second)` in the client options: a stuck socket costs the loop at most 2 s once; paho then drops the connection and later publishes fail at once until it reconnects.
-- `publish` hands the message to paho and returns its token; it does not wait for PUBACK.
-- **Publish outcomes as events.** For each `Publish*` effect the executor starts a goroutine that waits for the token (`Done()`, or `PublishTimeout` 30 s, or program shutdown) and sends `PublishDone{Ref, Kind, Err}` to the emitting lock: `nil` on PUBACK, the paho error (not connected, handoff timeout, connection lost), or `ErrPublishTimeout`. The goroutine is the only waiter; the loop never waits. Outcomes may arrive in any order, and reducers must not depend on that order. The reducer turns errors into rate-limited warnings today; the event is also the hook for anything that later needs delivery feedback (metrics, a health flag). Publishes the MQTT client makes on its own (discovery, the reconnect republish, removed-lock cleanup) produce no events.
+- `Publish*` methods hand the message to paho and return its token (`Done()`, `Error()`); they no longer wait for PUBACK.
 - `retainMu` covers one topic's "update cache, hand to paho"; the reconnect republish takes it per topic and sends that topic's current value, so a concurrent newer value is never overtaken by a stale one.
-- Publishes run inline on the loop in effect order, so a lock's messages leave in the order its reducer produced them (paho has one writer). There is no queue of our own: paho's writer is the queue.
+- The subscriber runs on the loop in fact order, so a lock's messages leave in the order its reducer produced them (paho has one writer). There is no queue of our own: paho's writer is the queue.
 - `Close` publishes the retained `offline` status and waits for it at most 2 s, then disconnects with a short quiesce (as today).
 
 ### 8.4 Shutdown
@@ -418,10 +459,10 @@ Cancelling the program context: the loop stops; the executor cancels in-flight e
 
 | Edge | Today | New |
 |---|---|---|
-| Bridge webhook HTTP | `Manager.BridgeKey`, `DeliverBridgeEvent` → per-lock queue | `Directory.BridgeKey` (snapshot updated on `RecordChanged`); `Program.Submit(BridgeEvent)`; full inbox → 503. PR #31's replay memory stays in `internal/webhook`. |
+| Bridge webhook HTTP | `Manager.BridgeKey`, `DeliverBridgeEvent` → per-lock queue | `Directory.BridgeKey` (from `CredentialsChanged` facts); `Program.Submit(BridgeEvent)`; full inbox → 503. PR #31's replay memory stays in `internal/webhook`. |
 | Cloud webhook HTTP / MQTT relay | `Manager.DeliverCloudWebhook` → `BindCloudID` under the supervisor's mutex | `Directory.BindCloudID` (same rules, synchronous, so HTTP still answers 409 on a mismatch); persisting a newly learned id is an executor `SaveCloudID` effect. |
 | MQTT command / webhooks/set | `forwardCommands` / `forwardWebhooksRequests` goroutines → `Manager` | Same goroutines → `Program.Submit`. Undelivered SetWebhooks requests are answered as today. |
-| `/healthz` | `Manager.Health` reads each supervisor under a mutex | `Directory.Health` (snapshot written by the loop after each dispatch). |
+| `/healthz` | `Manager.Health` reads each supervisor under a mutex | `Directory.Health` (from `LockStateChanged` facts). |
 | Startup refresh | `initialRefresh` with `Refresher` | The program starts with no locks; app submits `RefreshAll{Startup}` and `Await`s it (same decision rules as `initialRefresh`); then `AddLocks(selected)`. |
 | Removed locks | `Refresher.OnRemoved` → goroutine → `Manager.Remove` | `LocksRemoved` → the program deletes those models (their in-flight results are dropped) and calls the app's `OnRemoved` (retained topic cleanup, `published_ids`). |
 | Retained inputs | ignored in `internal/mqtt` | unchanged |
@@ -440,6 +481,7 @@ Cancelling the program context: the loop stops; the executor cancels in-flight e
 | 401 reads refunded (V12) | §7.1 | ported cloudhub 401 tests |
 | Bridge wire details, timestamp tolerance | library and `internal/webhook`, unchanged | unchanged tests |
 | No definite state older than reality without `state_stale` | `state.go`, `confirm.go`, `freshness` moved unchanged; results applied with the fetched-at guard | ported tests; new: "a poll result arriving after a newer webhook does not overwrite it" |
+| A lock's MQTT messages leave in the order its reducer produced them | synchronous bus on the loop; paho's single writer | subscriber test: facts reach subscribers in order; ported pipeline tests on command status order |
 | No attempt after its deadline (COR M1, gateway 5.8) | reducer check at emit + executor `ErrNotAttempted` + account check before `CloudCommand` | new tests per layer (§11) |
 
 ## 11. Behaviour (BDD skeleton)
@@ -451,8 +493,10 @@ engine.Program
             - stamps it with the clock's now and routes it to its lock's Update
         On a routed effect
             - delivers it to the target reducer in the same dispatch round, after the effects before it
+        On a fact
+            - hands it to every bus subscriber, in registration order, before the next effect
         On an I/O effect
-            - runs it inline (publish, log) or in a goroutine (everything else), in effect order
+            - starts it on the executor without waiting
         On a result for a removed lock
             - drops it
         On the timer
@@ -476,9 +520,31 @@ engine.Directory
         On a different id later
             - returns CloudIDMismatchError naming both ids
     BridgeKey
-        - returns the key of the lock's current record (updated on RecordChanged)
+        - returns the key from the lock's latest CredentialsChanged fact
     Health
-        - returns the snapshot written after the last dispatch
+        - returns mode, availability and last event from the lock's latest LockStateChanged fact
+
+bus.Bus
+    Publish
+        - calls every subscriber in registration order, synchronously
+        - subscribers ignore fact types they do not handle
+
+out.MQTT
+    Handle
+        On LockStateChanged
+            - publishes the retained state document, then availability
+        On LockEventOccurred / CommandStatusChanged / WebhookListChanged / WebhooksResultReady
+            - publishes to today's topic with today's payload and retain flag
+        On any publish
+            - returns without waiting for PUBACK
+        On a publish error, a lost connection or no PUBACK within 30 s
+            - logs a rate-limited warning naming the topic kind, never the payload
+            - calls OnOutcome if set
+
+out.Logger
+    Handle
+        On Log
+            - writes it with slog at its level, with the lock id
 
 lock.Model.Update
     Start
@@ -568,11 +634,6 @@ lock.Model.Update
             - falls back to cloud mode when local mode cannot continue
     WebhooksRequest
         - checks, plans and steps exactly as gateway 5.9; steps use the bridge slot and wait while a command is busy
-    PublishDone
-        On nil
-            - changes nothing
-        On an error
-            - logs a rate-limited warning naming the topic kind (never the payload)
     Due
         - returns the earliest of the model's schedules and the next local retry
 
@@ -623,9 +684,6 @@ account.Model.Update
 
 exec.Executor
     Run
-        On a publish effect
-            - hands it to paho and returns without waiting for PUBACK
-            - later sends exactly one PublishDone with the effect's Ref: nil on PUBACK, the paho error, or ErrPublishTimeout after 30 s
         On BridgeCommand or CloudCommand past its deadline
             - returns ErrNotAttempted without a network request
         On a bridge effect
@@ -636,9 +694,9 @@ exec.Executor
 mqtt.Client
     client options
         - set WriteTimeout to 2 s
-    publish
+    Publish*
         On a broker withholding PUBACK
-            - returns without waiting
+            - returns the token without waiting
     reconnect republish
         On a value published concurrently
             - the broker's last message on that topic is the newest value
@@ -647,22 +705,37 @@ mqtt.Client
 ## 12. Testing strategy
 
 - **Reducer tests** (`engine/lock`, `engine/account`): table tests of `(model setup, now, event) → effects + model fields`. No goroutines, no fakes of I/O.
-- **Scenario harness** (`engine/lock/harness_test.go`): the ported harness keeps today's verbs (`start`, `advance`, `send`, `command`, `toCloud`). It runs a lock model plus a real account model with a **synchronous fake executor** that resolves each effect against the existing `fakeBridge`/`fakeCloud`/`fakePub` and feeds the result back until quiescent. Existing scenario tests port almost line for line. A **held** mode keeps chosen effects pending so tests can interleave (command during a status read, result after a mode change).
+- **Scenario harness** (`engine/lock/harness_test.go`): the ported harness keeps today's verbs (`start`, `advance`, `send`, `command`, `toCloud`). It runs a lock model plus a real account model with a **synchronous fake executor** that resolves each effect against the existing `fakeBridge`/`fakeCloud` and feeds the result back until quiescent; `fakePub` becomes a recording bus subscriber, so assertions on published state, events and command status port unchanged. Existing scenario tests port almost line for line. A **held** mode keeps chosen effects pending so tests can interleave (command during a status read, result after a mode change).
 - **Invariant checks**: a harness hook validates every effect list: no `BridgeCommand` after a no-response/answer result for the same command, no two bridge effects in flight per lock, no `ListLocks` without a preceding `BudgetSaved`, no command effect past its deadline.
 - **Program tests** (`engine`): routing, ordering of routed effects, `ErrBusy`, removal dropping results, timer/heartbeat, shutdown; run with `-race -count=5`.
-- **Executor tests** (`engine/exec`): `PublishDone` for PUBACK, not connected and a withheld PUBACK (timeout), `ErrNotAttempted`, per-lock bridge mutex never contended under the reducer, one result per effect.
+- **Subscriber tests** (`engine/out`): every fact maps to today's topic, payload and retain flag (golden-compared with today's `internal/mqtt` tests); outcome warnings for not connected and a withheld PUBACK (timeout), rate-limited; facts reach subscribers in order.
+- **Executor tests** (`engine/exec`): `ErrNotAttempted`, per-lock bridge mutex never contended under the reducer, one result per effect.
 - **App integration** (`internal/app`): the existing end-to-end tests (in-process broker, `httptest` bridge and cloud) run unchanged against the swapped wiring.
 
 ## 13. Behaviour differences (need explicit acceptance)
 
-1. A command may wait for one in-flight bridge read (≤ 5 s) — same bound as today — but a cloud read or token mint never delays it any more.
-2. A shared read is taken with the most urgent waiter's priority, so a background poll waiting next to a confirmation read is served by it: fewer cloud calls, never more.
-3. A newer command arriving while an attempt is in flight waits (today it could not arrive during the attempt at all). If the attempt turns out undelivered, the older command ends `superseded` instead of being retried.
-4. Bridge HTTP failures from a previous record generation no longer count toward failover.
+One change is visible from outside (13.3); one saves cloud calls (13.2); two are notes on timing and on a situation that cannot occur today.
+
+**13.1 What a command can still wait for (improvement).** Today a command waits in the lock's queue behind whatever the supervisor is doing: a `/status` read (5 s), a cloud poll (up to ~50 s behind the hub's semaphore, a token mint and two 15 s list calls), a webhook registration chain (several 5 s calls), a credential refresh, a TCP probe (5 s) or MQTT publishes (5 s PUBACK wait each, up to 30 s on a stuck socket). New: only the one bridge HTTP call already in flight for that lock (≤ 5 s); a registration chain is interrupted between steps. An OPEN's local window (7 s) can still lose up to 5 s to a status read in flight, as today. Not chosen: running commands concurrently with bridge reads, since it is unknown whether the bridge handles concurrent requests well.
+
+**13.2 Combined cloud reads use the most urgent priority (fewer calls).** Today reads take turns at the hub's semaphore and each call is budgeted at its own priority: a background poll leaves 2 calls and is spaced 12 h / budget apart; a confirmation may use the whole budget. New: requests waiting at the same moment share one call, taken at the most urgent waiter's priority. Lock A's background poll waiting next to lock B's confirmation is served by B's call, where today A could have been deferred or refused and B made its own call. Never more calls; the background spacing then counts from that call.
+
+**13.3 A newer command during an attempt (visible change).** Today the newer command waits in the queue until the attempt returns, and its outcome depends on that result:
+
+| Older command's attempt | Today | New |
+|---|---|---|
+| 2xx, or no response | newer waits for the older's confirmation | same |
+| bridge unreachable, local retries left | older superseded, newer goes | same |
+| **bridge unreachable, past the local cutoff** | **older sent via the cloud in the same step**, then the newer one | **older superseded, newer goes** |
+| same command as the in-flight one | merged after the attempt | merged at once |
+
+Example: UNLOCK, then LOCK, with the bridge down. Today the door unlocks via the cloud and locks again; new, only LOCK is sent. The older command provably never reached the lock, so dropping it is safe and matches "latest command wins"; its status ends `superseded`. The newer command's `pending` status appears at arrival instead of after the older attempt. An attempt in flight is never superseded while it may still reach the lock.
+
+**13.4 Results from before a credential change (new situation, no visible change).** Today a refresh is synchronous, so no bridge result from the old record can arrive after the record changes. New: a `/status` to the old IP may still be in flight when a refresh delivers a new IP. Its failure does not count toward the failover threshold (it says nothing about the new IP); the stale mark still applies, and command results from the old record are always applied in full.
 
 ## 14. Migration (big-bang)
 
-1. **Engine PRs** (new packages only, not wired): `effect` + `engine` loop; `engine/account` (budget, reads, token, commands, refresh) with ported `budget_test.go`, `cloudhub_test.go`, `refresher_test.go`; `engine/lock` in slices (mode + doc + slots; pipeline; confirmation + status hint + event feed; registration + delivery; SetWebhooks + list); `engine/exec`; `mqtt` publishing changes (§8.3, usable by both engines).
+1. **Engine PRs** (new packages only, not wired): `effect` + `engine` loop + `bus`; `engine/out` (MQTT publisher, logger); `engine/account` (budget, reads, token, commands, refresh) with ported `budget_test.go`, `cloudhub_test.go`, `refresher_test.go`; `engine/lock` in slices (mode + doc + slots; pipeline; confirmation + status hint + event feed; registration + delivery; SetWebhooks + list); `engine/exec`; `mqtt` client changes (§8.3: `WriteTimeout`, token-returning `Publish*`, per-topic `retainMu`; the old gateway keeps waiting on the token until the swap).
 2. **Test port map** (old → new; every test name kept or mapped in the PR description):
 
    | `internal/gateway` test file | Tests | Target |
