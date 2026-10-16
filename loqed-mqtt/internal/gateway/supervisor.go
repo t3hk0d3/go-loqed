@@ -216,10 +216,12 @@ type Supervisor struct {
 	lastBoltEventAt   time.Time       // last webhook that set the bolt state
 
 	// Cloud reads run off the loop (spec: non-blocking supervisor 4.2).
-	read   chan cloudRead // the read in flight; nil when none
-	queued *cloudRequest  // the next read, merged from requests meanwhile
+	read     chan cloudRead // the read in flight; nil when none
+	readPrio Priority       // its priority
+	queued   *cloudRequest  // the next read, merged from requests meanwhile
 
 	lastStatusAt     time.Time // start of the last successful /status read
+	lastMayMoveAt    time.Time // last command request that may have moved the lock without an answer
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
 	lastPollAt       time.Time // last successful cloud poll
@@ -434,11 +436,11 @@ func (s *Supervisor) publish() {
 		}
 	}
 	if err := s.d.Publisher.PublishState(s.id, s.state); err != nil {
-		s.log.Warn("publishing state failed", "err", err)
+		s.warn("publishing state failed", "err", err)
 	}
 	avail := s.available()
 	if err := s.d.Publisher.PublishAvailability(s.id, avail); err != nil {
-		s.log.Warn("publishing availability failed", "err", err)
+		s.warn("publishing availability failed", "err", err)
 	}
 	s.mu.Lock()
 	s.health = Health{Mode: s.mode, Available: avail, LastEventAt: s.state.LastEventAt}
@@ -506,7 +508,7 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 		ev.Source = model.Ptr(model.SourceGateway)
 	}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {
-		s.log.Warn("publishing event failed", "err", err)
+		s.warn("publishing event failed", "err", err)
 	}
 }
 
@@ -548,7 +550,7 @@ func (s *Supervisor) commandFailed(c model.Command, class string, err error) {
 	s.log.Error("lock command failed", "command", c, "error_class", class, "err", err)
 	ev := model.Event{EventType: model.EventCommandFailed, Reason: string(c), Source: model.Ptr(model.SourceGateway), Error: class}
 	if perr := s.d.Publisher.PublishEvent(s.id, ev); perr != nil {
-		s.log.Warn("publishing event failed", "err", perr)
+		s.warn("publishing event failed", "err", perr)
 	}
 }
 

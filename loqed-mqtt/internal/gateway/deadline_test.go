@@ -82,3 +82,17 @@ func TestRequestContextsEndAtCutoffAndDeadline(t *testing.T) {
 		t.Fatalf("bridge request budget %v, want at most what was left of the local window", b)
 	}
 }
+
+func TestCloudRequestContextEndsAtDeadline(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.toCloud()
+	slowSending(h, 20*time.Second) // LOCK: 10 s of the 30 s left
+	h.command(model.CommandLock)
+	if len(h.cloud.cmdBudgets) != 1 {
+		t.Fatalf("cloud calls = %d, want 1", len(h.cloud.cmdBudgets))
+	}
+	if b := h.cloud.cmdBudgets[0]; b > 10*time.Second || b < 9*time.Second {
+		t.Fatalf("cloud request budget %v, want the 10 s left until the deadline", b)
+	}
+}

@@ -11,7 +11,9 @@ import (
 )
 
 // wallOnlyCalls lists where the module may use time operations that drop
-// Go's monotonic clock reading (UTC, Local, In, Round, Truncate, time.Unix).
+// Go's monotonic clock reading (UTC, Local, In, Round, Truncate, time.Unix*,
+// time.Parse*). Method names are matched without type information, so a
+// Duration.Round would count too: list it here with a comment.
 // Such values are for display and persistence only: a deadline, timeout or
 // window derived from them would follow wall-clock steps (NTP corrections).
 // A new call must be added here deliberately, after checking it never feeds
@@ -48,7 +50,7 @@ func TestWallClockOnlyTimeCallsStayAtSerializationSites(t *testing.T) {
 			switch sel.Sel.Name {
 			case "UTC", "Local", "In", "Round", "Truncate":
 				got[filepath.ToSlash(rel)]++
-			case "Unix":
+			case "Unix", "UnixMilli", "UnixMicro", "Parse", "ParseInLocation":
 				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "time" {
 					got[filepath.ToSlash(rel)]++
 				}

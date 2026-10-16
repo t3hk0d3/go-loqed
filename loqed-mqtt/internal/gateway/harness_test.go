@@ -134,7 +134,7 @@ func (f *fakeCloud) Locks(_ context.Context, p Priority, notBefore time.Time) (L
 	if at.IsZero() {
 		at = f.now()
 	}
-	return LockList{Locks: f.locks, FetchedAt: at}, nil
+	return LockList{Locks: slices.Clone(f.locks), FetchedAt: at}, nil // a held read keeps what it fetched
 }
 
 func (f *fakeCloud) Command(ctx context.Context, _ string, s loqed.BoltState) error {

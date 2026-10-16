@@ -343,6 +343,7 @@ func (p *commandPipeline) sent(now time.Time, a *command, via model.Via) {
 // unchanged, is stale until something shows where the bolt is.
 func (p *commandPipeline) mayHaveMoved(now time.Time, a *command) {
 	s := p.s
+	s.lastMayMoveAt = now // cloud data fetched before this no longer shows where the bolt is
 	if s.state.BoltState == a.target() {
 		return
 	}
@@ -501,7 +502,7 @@ func (p *commandPipeline) publish(now time.Time, a *command) {
 		st.Error = model.Ptr(a.errClass)
 	}
 	if err := p.s.d.Publisher.PublishCommandStatus(p.s.id, st); err != nil {
-		p.s.log.Warn("publishing command status failed", "err", err)
+		p.s.warn("publishing command status failed", "err", err)
 	}
 }
 

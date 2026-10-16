@@ -205,3 +205,93 @@ func TestOneLocksBlockedReadDoesNotDelayAnotherLocksCommand(t *testing.T) {
 		synctest.Wait()
 	})
 }
+
+// published returns the states published from index i on.
+func (h *harness) publishedSince(i int) []model.State { return h.pub.states[i:] }
+
+func TestReadFromBeforeANoResponseCommandKeepsStateStale(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.toCloud()
+	h.holdReads = true
+	h.advance(h.s.t.CloudPoll) // background read fetched now: day_lock
+	h.now = h.now.Add(time.Second)
+	h.cloud.commandErr = loqed.ErrNoResponse
+	from := len(h.pub.states)
+	h.command(model.CommandLock) // may have locked the door
+	h.releaseReads()
+	for _, st := range h.publishedSince(from) {
+		if !st.StateStale {
+			t.Fatalf("a read fetched before the no-response LOCK published a definite %s", st.BoltState)
+		}
+	}
+}
+
+func TestStaleConfirmationReadDoesNotConfirmALaterCommand(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.toCloud()
+	h.command(model.CommandUnlock) // A: sent via the cloud
+	h.cloud.locks[0].BoltState = loqed.BoltDayLock
+	h.holdReads = true
+	h.advance(h.s.t.CloudConfirm) // A's confirmation read, fetched now: day_lock
+	h.run(h.s.t.WebhookConfirm)   // A ends no_confirmation
+	h.cloud.locks[0].BoltState = loqed.BoltNightLock
+	h.cloud.commandErr = loqed.ErrNoResponse
+	h.now = h.now.Add(time.Second)
+	bAt := h.now
+	h.command(model.CommandUnlock) // B: no response
+	h.releaseReads()
+	for _, st := range h.pub.statuses {
+		if st.ReceivedAt.Equal(bAt) && st.Status == model.StatusConfirmed {
+			t.Fatal("A's old confirmation read confirmed command B")
+		}
+	}
+}
+
+func TestBackgroundRequestWhileBackgroundReadInFlightIsDropped(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.toCloud()
+	h.holdReads = true
+	h.s.requestCloud(t.Context(), PriorityBackground, time.Time{})
+	h.s.requestCloud(t.Context(), PriorityBackground, time.Time{})
+	if h.s.queued != nil {
+		t.Fatalf("queued %+v behind a background read already in flight", *h.s.queued)
+	}
+}
+
+func TestBackgroundReadInLocalModeKeepsBridgeState(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start() // local: /status says day_lock
+	h.s.applyCloudRead(t.Context(), cloudRead{req: cloudRequest{p: PriorityBackground},
+		list: LockList{Locks: []cloud.Lock{{ID: "lock1", BoltState: loqed.BoltNightLock}}, FetchedAt: h.now.Add(time.Hour)}})
+	if h.state().BoltState != loqed.BoltDayLock {
+		t.Fatalf("a background cloud read in local mode replaced the bridge state with %s", h.state().BoltState)
+	}
+}
+
+func TestStatusReadRecordsItsStartTime(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.advance(24 * time.Hour) // periodic reconcile: /status
+	if !h.s.lastStatusAt.Equal(h.now) {
+		t.Fatalf("lastStatusAt = %v, want the reconcile read's start %v", h.s.lastStatusAt, h.now)
+	}
+}
+
+func TestNoStaleFlashWhileAReadIsInFlight(t *testing.T) {
+	h := newHarness(t, testRecord(), config.LockSetting{})
+	h.start()
+	h.toCloud()
+	h.holdReads = true
+	h.advance(h.s.t.CloudPollSpacing + h.s.t.StaleGrace + time.Minute) // overdue, and a poll starts
+	if h.state().StateStale {
+		t.Fatal("marked stale although the read that brings fresh data is in flight")
+	}
+	h.releaseReads()
+	if h.state().StateStale {
+		t.Fatal("stale after fresh data arrived")
+	}
+}
