@@ -7,7 +7,7 @@ configuration:
     description: Used to create a personal access token automatically.
   cloud_password:
     name: LOQED password
-    description: Only needed to create a token; can be removed after the first successful start.
+    description: Used to create the token and to renew it before it expires (about every six months). Keep it set; without it, paste a new token manually.
   locks:
     name: Locks
     description: Names or ids of the locks to expose. Empty exposes every lock on the account.
