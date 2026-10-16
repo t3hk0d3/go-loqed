@@ -2,6 +2,7 @@ package mqtt
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -110,13 +111,29 @@ type Client struct {
 	failedConnects int
 	connWarned     map[string]*connWarn
 
-	// retainMu serializes "update cache + publish" for retained per-lock
-	// topics with the reconnect republish, so an older document can never
-	// be published after a newer one.
+	// pubWarned rate-limits failed-publish warnings per topic kind.
+	pubWarned map[string]*connWarn
+
+	// retainMu serializes "update cache + hand to paho" for one retained
+	// per-lock topic with the reconnect republish, so an older document can
+	// never be published after a newer one.
 	retainMu sync.Mutex
+
+	// closed ends the goroutines that watch publish outcomes.
+	closed context.Context
+	close  context.CancelFunc
 }
 
+// publishTimeout bounds the publishes that wait for their acknowledgement
+// (gateway status, discovery, removed-lock clean-up).
 const publishTimeout = 5 * time.Second
+
+// outcomeTimeout: a lock publish without PUBACK after this long is reported.
+const outcomeTimeout = 30 * time.Second
+
+// writeTimeout bounds paho's handoff to its writer and each socket write, so
+// a stuck connection blocks a publisher for at most this long.
+const writeTimeout = 2 * time.Second
 
 // connWarnWindow: repeats of the same connect failure within this window are
 // only counted and reported with the next warning (like the gateway's
@@ -137,6 +154,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		c.now = time.Now
 	}
 	c.downSince = c.now()
+	c.closed, c.close = context.WithCancel(context.Background())
 	opts := paho.NewClientOptions().
 		AddBroker(cfg.URL).
 		SetClientID(cfg.ClientID).
@@ -148,6 +166,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 		SetConnectRetryInterval(5*time.Second).
 		SetMaxReconnectInterval(time.Minute).
 		SetKeepAlive(30*time.Second).
+		SetWriteTimeout(writeTimeout).
 		// In order: OPEN then LOCK must never reach the gateway as LOCK then
 		// OPEN (latest command wins). Safe because no handler blocks.
 		SetOrderMatters(true).
@@ -177,6 +196,7 @@ func NewClient(cfg ClientConfig, log *slog.Logger) *Client {
 func (c *Client) Start() { c.mc.Connect() }
 
 func (c *Client) Close() {
+	c.close()
 	if c.mc.IsConnectionOpen() {
 		c.mc.Publish(c.cfg.Topics.Status(), 1, true, "offline").WaitTimeout(2 * time.Second)
 	}
@@ -243,7 +263,7 @@ func (c *Client) PublishState(lockID string, s model.State) error {
 	c.mu.Lock()
 	c.states[lockID] = b
 	c.mu.Unlock()
-	return c.publish(c.cfg.Topics.State(TopicID(lockID)), true, b)
+	return c.publishAsync("state", c.cfg.Topics.State(TopicID(lockID)), true, b)
 }
 
 // PublishCommandStatus publishes the retained command_status document.
@@ -257,7 +277,7 @@ func (c *Client) PublishCommandStatus(lockID string, s model.CommandStatus) erro
 	c.mu.Lock()
 	c.cmdStatus[lockID] = b
 	c.mu.Unlock()
-	return c.publish(c.cfg.Topics.CommandStatus(TopicID(lockID)), true, b)
+	return c.publishAsync("command_status", c.cfg.Topics.CommandStatus(TopicID(lockID)), true, b)
 }
 
 // PublishWebhooks publishes the retained bridge webhook list.
@@ -271,7 +291,7 @@ func (c *Client) PublishWebhooks(lockID string, l model.WebhookList) error {
 	c.mu.Lock()
 	c.hookLists[lockID] = b
 	c.mu.Unlock()
-	return c.publish(c.cfg.Topics.Webhooks(TopicID(lockID)), true, b)
+	return c.publishAsync("webhooks", c.cfg.Topics.Webhooks(TopicID(lockID)), true, b)
 }
 
 // PublishWebhooksResult publishes a SetWebhooks result (not retained).
@@ -280,7 +300,7 @@ func (c *Client) PublishWebhooksResult(lockID string, r model.WebhooksResult) er
 	if err != nil {
 		return err
 	}
-	return c.publish(c.cfg.Topics.WebhooksResult(TopicID(lockID)), false, b)
+	return c.publishAsync("webhooks_result", c.cfg.Topics.WebhooksResult(TopicID(lockID)), false, b)
 }
 
 func (c *Client) PublishEvent(lockID string, e model.Event) error {
@@ -288,7 +308,7 @@ func (c *Client) PublishEvent(lockID string, e model.Event) error {
 	if err != nil {
 		return err
 	}
-	return c.publish(c.cfg.Topics.Event(TopicID(lockID)), false, b)
+	return c.publishAsync("event", c.cfg.Topics.Event(TopicID(lockID)), false, b)
 }
 
 func (c *Client) PublishAvailability(lockID string, online bool) error {
@@ -305,11 +325,70 @@ func (c *Client) PublishAvailability(lockID string, online bool) error {
 	}
 	c.avail[lockID] = v
 	c.mu.Unlock()
-	return c.publish(c.cfg.Topics.Availability(TopicID(lockID)), true, []byte(v))
+	return c.publishAsync("availability", c.cfg.Topics.Availability(TopicID(lockID)), true, []byte(v))
 }
 
-// publish sends a QoS 1 message. While disconnected it does nothing:
-// retained state is republished from the caches on reconnect.
+// publishAsync hands a QoS 1 message to paho without waiting for its PUBACK
+// (lock publishes: the gateway must never wait on the broker). While
+// disconnected it does nothing: retained state is republished from the
+// caches on reconnect. A failure paho reports at once is returned; a later
+// one is logged by watchPublish.
+func (c *Client) publishAsync(kind, topic string, retain bool, payload []byte) error {
+	if !c.mc.IsConnectionOpen() {
+		return nil
+	}
+	tok := c.mc.Publish(topic, 1, retain, payload)
+	select {
+	case <-tok.Done():
+		return tok.Error()
+	default:
+	}
+	go c.watchPublish(kind, tok)
+	return nil
+}
+
+// watchPublish waits for a publish's outcome and warns about a failure or a
+// missing PUBACK. Nothing waits for it.
+func (c *Client) watchPublish(kind string, tok paho.Token) {
+	t := time.NewTimer(outcomeTimeout)
+	defer t.Stop()
+	select {
+	case <-tok.Done():
+		if err := tok.Error(); err != nil {
+			c.warnPublish(kind, err.Error())
+		}
+	case <-t.C:
+		c.warnPublish(kind, "no acknowledgement from the broker")
+	case <-c.closed.Done():
+	}
+}
+
+// warnPublish logs a failed publish of one topic kind, rate-limited like the
+// connect warnings. The topic and payload are never logged.
+func (c *Client) warnPublish(kind, why string) {
+	now := c.now()
+	c.mu.Lock()
+	w := c.pubWarned[kind]
+	if w != nil && now.Sub(w.last) < connWarnWindow {
+		w.suppressed++
+		c.mu.Unlock()
+		return
+	}
+	args := []any{"kind", kind, "reason", why}
+	if w != nil && w.suppressed > 0 {
+		args = append(args, "repeated", w.suppressed)
+	}
+	if c.pubWarned == nil {
+		c.pubWarned = map[string]*connWarn{}
+	}
+	c.pubWarned[kind] = &connWarn{last: now}
+	c.mu.Unlock()
+	c.log.Warn("publishing "+kind+" failed", args...)
+}
+
+// publish sends a QoS 1 message and waits for its acknowledgement (gateway
+// status, discovery, removed-lock clean-up). While disconnected it does
+// nothing.
 func (c *Client) publish(topic string, retain bool, payload []byte) error {
 	if !c.mc.IsConnectionOpen() {
 		return nil
@@ -421,23 +500,43 @@ func (c *Client) onConnect() {
 		c.log.Warn("publishing gateway status failed", "err", err)
 	}
 	c.publishDiscovery()
+	c.mu.Lock()
+	avail, states := slices.Sorted(maps.Keys(c.avail)), slices.Sorted(maps.Keys(c.states))
+	cmdStatus, hookLists := slices.Sorted(maps.Keys(c.cmdStatus)), slices.Sorted(maps.Keys(c.hookLists))
+	c.mu.Unlock()
+	for _, id := range avail {
+		c.republish("availability", t.Availability(TopicID(id)), func() []byte {
+			if v, ok := c.avail[id]; ok {
+				return []byte(v)
+			}
+			return nil
+		})
+	}
+	for _, id := range states {
+		c.republish("state", t.State(TopicID(id)), func() []byte { return c.states[id] })
+	}
+	for _, id := range cmdStatus {
+		c.republish("command_status", t.CommandStatus(TopicID(id)), func() []byte { return c.cmdStatus[id] })
+	}
+	for _, id := range hookLists {
+		c.republish("webhooks", t.Webhooks(TopicID(id)), func() []byte { return c.hookLists[id] })
+	}
+}
+
+// republish sends one retained topic's current cached value (read under
+// c.mu by current), holding retainMu only for this topic's handoff: a value
+// published meanwhile is either already cached and sent here, or handed to
+// paho after this one.
+func (c *Client) republish(kind, topic string, current func() []byte) {
 	c.retainMu.Lock()
 	defer c.retainMu.Unlock()
 	c.mu.Lock()
-	states, cmdStatus, hookLists, avail := maps.Clone(c.states), maps.Clone(c.cmdStatus), maps.Clone(c.hookLists), maps.Clone(c.avail)
+	b := current()
 	c.mu.Unlock()
-	for id, v := range avail {
-		_ = c.publish(t.Availability(TopicID(id)), true, []byte(v))
+	if b == nil {
+		return // removed meanwhile
 	}
-	for id, b := range states {
-		_ = c.publish(t.State(TopicID(id)), true, b)
-	}
-	for id, b := range cmdStatus {
-		_ = c.publish(t.CommandStatus(TopicID(id)), true, b)
-	}
-	for id, b := range hookLists {
-		_ = c.publish(t.Webhooks(TopicID(id)), true, b)
-	}
+	_ = c.publishAsync(kind, topic, true, b)
 }
 
 // waitSubscribe logs a warning if a subscription fails or times out.
