@@ -172,7 +172,8 @@ func TestPollOlderThanEventIsIgnored(t *testing.T) {
 	h.send(reached("STATE_CHANGED_LATCH", nil)) // event at now
 	h.cloud.fetchedAt = h.now.Add(-time.Second) // poll data from before it
 	h.cloud.locks[0].BoltState = loqed.BoltNightLock
-	h.s.pollCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.s.requestCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.pump()
 	if h.lock() != "UNLOCKED" {
 		t.Fatalf("older poll overwrote newer event: %s", h.lock())
 	}
@@ -183,9 +184,11 @@ func TestMissingOnlineKeepsPreviousValue(t *testing.T) {
 	h.start()
 	h.toCloud()
 	h.cloud.locks[0].Online = model.Ptr(false)
-	h.s.pollCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.s.requestCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.pump()
 	h.cloud.locks[0].Online = nil
-	h.s.pollCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.s.requestCloud(t.Context(), PriorityConfirm, time.Time{})
+	h.pump()
 	if h.state().LockOnline {
 		t.Fatal("absent online must keep the previous value")
 	}
@@ -278,7 +281,8 @@ func TestCommandFailoverSkippedWhenAlreadyLeftLocal(t *testing.T) {
 	h.cmd(model.CommandLock, "")
 	h.step(21 * time.Second)
 	h.s.enterCloud(context.Background()) // something else failed over meanwhile
-	h.run(40 * time.Second)              // the command resolves (confirmed or no_confirmation)
+	h.pump()
+	h.run(40 * time.Second) // the command resolves (confirmed or no_confirmation)
 	if st := h.lastStatus(); st.Status != model.StatusConfirmed && st.Status != model.StatusFailed {
 		t.Fatalf("status %+v", st)
 	}

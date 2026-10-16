@@ -37,11 +37,13 @@ func (s *Supervisor) tryEnterLocal(ctx context.Context) bool {
 	if !s.ensureBridge() {
 		return false
 	}
+	started := s.d.Now()
 	st, err := s.status(ctx)
 	if err != nil {
 		s.log.Debug("bridge not reachable", "err", err)
 		return false
 	}
+	s.lastStatusAt = started
 	now := s.d.Now()
 	s.setMode(model.ModeLocal)
 	s.markUnconfirmed(now)
@@ -279,6 +281,7 @@ func (s *Supervisor) readStatus(ctx context.Context) bool {
 		s.httpFailure(ctx, err)
 		return false
 	}
+	s.lastStatusAt = now
 	s.httpFailures = 0
 	if s.missedBridgeChange(now, st.BoltState) {
 		s.unconfirmWebhooks(now, "the bridge status changed without a bridge webhook")

@@ -91,6 +91,8 @@ type Deps struct {
 	TokenExpiry func() (time.Time, bool)
 	Now         func() time.Time
 	Log         *slog.Logger
+	// Go runs a cloud read off the supervisor goroutine (nil: a goroutine).
+	Go func(func())
 }
 
 type Timing struct {
@@ -213,6 +215,11 @@ type Supervisor struct {
 	move              movement        // expected bolt movement (for /status hints)
 	lastBoltEventAt   time.Time       // last webhook that set the bolt state
 
+	// Cloud reads run off the loop (spec: non-blocking supervisor 4.2).
+	read   chan cloudRead // the read in flight; nil when none
+	queued *cloudRequest  // the next read, merged from requests meanwhile
+
+	lastStatusAt     time.Time // start of the last successful /status read
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
 	lastPollAt       time.Time // last successful cloud poll
@@ -236,6 +243,9 @@ func NewSupervisor(rec store.LockRecord, setting config.LockSetting, d Deps, t T
 		warned: map[string]*warnState{},
 	}
 	s.cmds.s = s
+	if s.d.Go == nil {
+		s.d.Go = func(f func()) { go f() }
+	}
 	return s
 }
 
@@ -359,6 +369,8 @@ func (s *Supervisor) Run(ctx context.Context) {
 			s.stepWebhooks(ctx)
 		case m := <-s.in:
 			s.handle(ctx, m)
+		case r := <-s.read:
+			s.applyCloudRead(ctx, r)
 		}
 	}
 }
@@ -377,7 +389,7 @@ func (s *Supervisor) tick(ctx context.Context) {
 	now := s.d.Now()
 	if !s.cloudConfirmAt.IsZero() && !now.Before(s.cloudConfirmAt) {
 		s.cloudConfirmAt = time.Time{}
-		s.pollCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
+		s.requestCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
 	}
 	switch s.mode {
 	case model.ModeLocal:

@@ -801,6 +801,7 @@ func TestFallbackPollWithPreCommandDataKeepsMovingState(t *testing.T) {
 	h.cloud.fetchedAt = h.now
 	h.step(20 * time.Second)
 	h.s.enterCloud(context.Background()) // a failover while the command is in flight
+	h.pump()
 	if h.s.mode != model.ModeCloud || h.lock() != "LOCKING" {
 		t.Fatalf("mode %s lock %s", h.s.mode, h.lock())
 	}
