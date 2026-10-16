@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	loqed "github.com/t3hk0d3/go-loqed"
@@ -33,11 +34,14 @@ type Options struct {
 	Sink        Sink
 	CloudSecret string // empty disables POST /cloud/{secret}/{id}
 	// BridgeTimestampTolerance is the accepted age of a bridge webhook's
-	// TIMESTAMP; 0 accepts any age.
+	// TIMESTAMP; 0 accepts any age. It also sets how long applied deliveries
+	// are remembered so that a repeat is applied only once.
 	BridgeTimestampTolerance time.Duration
 	MQTTDownFor              func() time.Duration // 0 while connected
 	Now                      func() time.Time
 	Log                      *slog.Logger
+
+	seen *seenDeliveries
 }
 
 // HealthReport is the /healthz body.
@@ -46,14 +50,25 @@ type HealthReport struct {
 	Locks         map[string]gateway.Health `json:"locks"`
 }
 
+type server struct {
+	http.Handler
+	seen *seenDeliveries
+}
+
 func NewHandler(o Options) http.Handler {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	o.seen = newSeenDeliveries(o.BridgeTimestampTolerance)
+	s := &server{seen: o.seen}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/{id}", o.bridgeWebhook)
 	if o.CloudSecret != "" {
 		mux.HandleFunc("POST /cloud/{secret}/{id}", o.cloudWebhook)
 	}
 	mux.HandleFunc("GET /healthz", o.healthz)
-	return mux
+	s.Handler = mux
+	return s
 }
 
 func (o Options) bridgeWebhook(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +88,8 @@ func (o Options) bridgeWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	ev, err := bridge.ParseEventWithin(key, body, hash, ts, o.Now(), o.BridgeTimestampTolerance)
+	now := o.Now()
+	ev, err := bridge.ParseEventWithin(key, body, hash, ts, now, o.BridgeTimestampTolerance)
 	switch {
 	case errors.Is(err, loqed.ErrStaleTimestamp):
 		// Only reachable with a valid HASH: the bridge delivered it late
@@ -91,7 +107,27 @@ func (o Options) bridgeWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	o.deliverResult(w, r, o.Sink.DeliverBridgeEvent(id, ev))
+	// The HASH is verified, so its normalized form (as ParseEventWithin
+	// compares it) identifies this delivery.
+	sig := strings.ToLower(strings.TrimSpace(hash))
+	if !o.seen.claim(id, sig, now) {
+		// Answer 200: the delivery was applied, and an error would only make
+		// a retrying sender try again. Never log the HASH or the body.
+		if ok, repeated := o.seen.shouldLog(id, now); ok {
+			args := []any{"lock_id", id}
+			if repeated > 0 {
+				args = append(args, "repeated", repeated)
+			}
+			o.Log.Info("ignored a bridge webhook delivery that was already applied (delivered twice or resent)", args...)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	err = o.Sink.DeliverBridgeEvent(id, ev)
+	if err != nil {
+		o.seen.release(id, sig) // not applied: a retry must not count as a repeat
+	}
+	o.deliverResult(w, r, err)
 }
 
 func (o Options) cloudWebhook(w http.ResponseWriter, r *http.Request) {

@@ -168,8 +168,11 @@ the bridge delivered the webhook more than 20 s after signing it. This
 happens when the bridge has many registered webhooks, because it calls them
 one after another, or when the clocks differ. Remove old webhooks from the
 bridge, check NTP, or raise `webhook.bridge_timestamp_tolerance` (for
-example `60s`; `0` turns the check off, and a recorded webhook could then be
-replayed on your network).
+example `60s`; `0` turns the check off). A webhook that arrives more than
+once is applied only once, so a repeat or a resent copy cannot bring back an
+older lock state. With the check off the gateway remembers only the last 256
+webhooks per lock, so an older recorded webhook could still be replayed on
+your network.
 
 ### Configuration
 
