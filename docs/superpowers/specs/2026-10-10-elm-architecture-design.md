@@ -1,6 +1,6 @@
 # loqed-mqtt: Elm-style engine (reducers + effects) — Design
 
-Date: 2026-10-10 (revised 2026-10-13 after the adversarial review)
+Date: 2026-10-10 (revised 2026-10-13 after the adversarial review; 2026-10-16: unified queue, recorder, time helpers)
 Status: Draft, for review
 Findings: ARCH H1 (blocking I/O on the per-lock goroutine), ARCH H2 (`Supervisor` is a god object), COR M1 (an attempt can start after its deadline); see `.superpowers/sdd/2026-10-10-project-review/`.
 Supersedes: `2026-10-10-nonblocking-supervisor-design.md` (incremental fix, not implemented).
@@ -41,9 +41,8 @@ flowchart LR
     end
 
     subgraph Loop["Event loop (one goroutine)"]
-        IN[["inbox<br/>(edges, per-lock limit)"]]
-        RES[["results<br/>(executor)"]]
-        R{"route"}
+        Q[["queue<br/>internal lane · external lane<br/>(edge input: per-lock limit)"]]
+        R{"pop · route"}
         L1["lock.Model #1<br/>Update"]
         L2["lock.Model #N<br/>Update"]
         A["account.Model<br/>Update"]
@@ -61,35 +60,37 @@ flowchart LR
         GO["goroutine per effect:<br/>bridge · cloud · probe ·<br/>token · store"]
     end
 
-    HTTP --> IN
-    MQ --> IN
-    APP --> IN
-    IN --> R
-    RES --> R
-    T(("heartbeat 1 s ·<br/>Due timer")) --> R
+    HTTP --> Q
+    MQ --> Q
+    APP --> Q
+    T(("heartbeat 1 s ·<br/>Due timer")) --> Q
+    Q --> R
     R --> L1 & L2 & A
     L1 & L2 & A --> D
-    D -- "routed effects<br/>(lock ↔ account)" --> R
-    D -- "facts" --> F
+    D -- "routed effects · facts · I/O effects<br/>(internal lane)" --> Q
+    R -- "facts" --> F
     F --> SM & SD & SL
-    D -- "I/O effects" --> GO
-    GO -- "result events" --> RES
+    R -- "I/O effects" --> GO
+    GO -- "result events<br/>(external lane)" --> Q
+    R -. "every popped item" .-> REC[("Recorder<br/>(optional)")]
     SM --> BROKER[("MQTT broker")]
     GO --> NET[("bridge · LOQED cloud ·<br/>portal · /data")]
 ```
 
-- **Edges** turn outside input into events and put them on the inbox without blocking. A lock with too much unprocessed input gets `ErrBusy` for its own input only (§5.2).
+- **Pattern.** This is the Reactor pattern in its Proactor form: one thread of control demultiplexes events and dispatches them to handlers that never block, and I/O runs elsewhere and comes back as completion events. Go's own network poller sits below the executor's goroutines, so the loop never deals with socket readiness.
+- **Edges** turn outside input into events and push them onto the queue without blocking. A lock with too much unprocessed input gets `ErrBusy` for its own input only (§5.2).
 - The **loop** stamps each event with the current time, routes it to one reducer, and dispatches the returned output in order.
 - **Reducers** (`lock.Model`, `account.Model`) are deterministic: `(model, now, event) → model', output`. No I/O (not even a route lookup), no clock, no goroutines, no logger.
 - Reducers return three kinds of output, in one ordered list:
-    - **Routed effects** are messages between reducers (a lock asks the account for a cloud read; the account answers). The loop delivers them as events in the same dispatch round.
+    - **Routed effects** are messages between reducers (a lock asks the account for a cloud read; the account answers). The loop delivers them as events before any new external input.
     - **Facts** say what happened (`LockStateChanged`, `CommandStatusChanged`, `LockEventOccurred`, `Log`, …). The loop hands each fact to the **output bus**, whose subscribers (MQTT publisher, Directory, logger) turn it into output. Reducers know nothing about MQTT, topics or logging (§5.4).
     - **I/O effects** ask for work with an answer (bridge, cloud, probes, token, store). The **executor** runs each in a goroutine and its result comes back as an event.
 
 ## 5. Core types and packages
 
 ```
-loqed-mqtt/internal/engine/            loop, Event/Effect plumbing, Directory (edge snapshot, a bus subscriber), Program API, RunSync
+loqed-mqtt/internal/engine/            loop, Queue, envelope and Recorder, Directory (edge snapshot, a bus subscriber), Program API, RunSync
+loqed-mqtt/internal/engine/timer/      pure time helpers used by reducers: Deadline, Backoff, Limiter, Window
 loqed-mqtt/internal/engine/bus/        output bus: Fact dispatch to subscribers
 loqed-mqtt/internal/engine/out/        output subscribers: MQTT publisher, logger
 loqed-mqtt/internal/engine/lock/       per-lock reducer (one file per state group, see §6)
@@ -98,7 +99,7 @@ loqed-mqtt/internal/engine/effect/     event, effect and fact types shared by re
 loqed-mqtt/internal/engine/exec/       executor: bridge/cloud/probe/token/store adapters
 ```
 
-Dependency direction: `lock`, `account` → `effect`, `model`, `store` (types only), library types. `exec` → `effect`, library clients, `auth`, `store`, `webhook` (own-URL computation). `out` → `effect`, `model`, and its own `Publisher` interface (satisfied by `*mqtt.Client`; `internal/mqtt` imports nothing from the engine). `engine` → all of them. `lock` and `account` never import each other, `bus`, `out`, `exec`, `mqtt`, `webhook` or `auth`.
+Dependency direction: `lock`, `account` → `effect`, `timer`, `model`, `store` (types only), library types. `timer` imports only the standard library. `exec` → `effect`, library clients, `auth`, `store`, `webhook` (own-URL computation). `out` → `effect`, `model`, and its own `Publisher` interface (satisfied by `*mqtt.Client`; `internal/mqtt` imports nothing from the engine). `engine` → all of them. `lock` and `account` never import each other, `bus`, `out`, `exec`, `mqtt`, `webhook` or `auth`.
 
 ### 5.1 Contracts (signatures, not code)
 
@@ -123,39 +124,47 @@ Dependency direction: `lock`, `account` → `effect`, `model`, `store` (types on
 | `bus.Subscriber` | `Handle(f effect.Fact)` | Picks the fact types it cares about, ignores the rest. |
 | `out.MQTT` | `New(p Publisher, log *slog.Logger, opts Options) *MQTT` | Subscriber: facts → MQTT topics (§5.4). |
 | `out.Logger` | `New(log *slog.Logger) *Logger` | Subscriber: `Log` facts → `slog`. |
-| `exec.Executor` | `Run(ctx, effect.Effect)` | One goroutine per I/O effect; results go to the loop's results channel. |
+| `exec.Executor` | `Run(ctx, effect.Effect)` | One goroutine per I/O effect; results go to the queue's external lane. |
+| `engine.Queue` | `PushExternal(Envelope) error`, `PushInternal(Envelope)`, `Pop() (Envelope, bool)`, `Notify() <-chan struct{}` | Unbounded, two lanes, mutex-protected; only external edge input is admission-controlled (§5.2). |
+| `engine.Envelope` | `struct{ Seq uint64; At time.Time; Kind Kind; Lock string; Ref effect.Ref; Payload any }` | `Kind` ∈ input, result, tick, routed, fact, effect. Every item on the queue is one. |
+| `engine.Recorder` | `Record(Envelope)` | Optional tap called for every popped envelope; must not block; payloads redacted per kind. |
+| `timer.Deadline` | `Arm(at)`, `Disarm()`, `Due(now) bool`, `Next() time.Time` | One scheduled moment (confirmation windows, periodic checks). |
+| `timer.Backoff` | `New(steps []time.Duration, max)`, `Next(now) time.Time`, `Fail()`, `Reset()` | Retry spacing (local 0.5/1/2 s; refresh 5 min doubling to 6 h). |
+| `timer.Limiter` | `Allow(key, now) (ok bool, suppressed int)`, `Next() time.Time` | Rate-limited warnings (10 min window, repeat counts). |
+| `timer.Window` | `Within(start, now) bool` | Age checks (duplicate and pairing windows, status windows). |
 
 **Why mutate in place.** Go has no persistent data structures; copying a model with slices and maps on every event is error-prone. `Update` mutates the model it is called on and nothing else, so it is still a deterministic function of (model, now, event) and tests can snapshot and compare models.
 
-**Time.** Reducers never read a clock. `now` comes from the loop per dispatch; the loop's clock is injected (`Options.Now`), so tests control it. Schedules are absolute times in the model (`nextProbe`, `confirmAt`, …).
+**Time.** Reducers never read a clock. `now` comes from the loop per pop; the loop's clock is injected (`Options.Now`), so tests control it. Every schedule in a model is a `timer` helper (`Deadline`, `Backoff`, `Limiter`), not a bare `time.Time` field, and `Due()` is the minimum of the helpers' `Next()`. A schedule therefore cannot be missing from `Due()`; the heartbeat stays as a safety net.
 
 ### 5.2 The loop
 
 ```
 loop:
     heartbeat := ticker every 1 s                      // fixed schedule, never pushed back by other events
-    dueTimer  := re-armed after every dispatch at min(Due() over all models)
+    dueTimer  := re-armed after every pop at min(Due() over all models)
     select:
         ctx done          → return
-        event from inbox  → dispatch(event)
-        result            → dispatch(result)            // results for removed locks are dropped
-        heartbeat         → dispatch(Tick) to every model
-        dueTimer          → dispatch(Tick) to every model whose Due() ≤ now
+        queue.Notify()    → drain()
+        heartbeat         → push Tick for every model (external lane); drain()
+        dueTimer          → push Tick for every model whose Due() ≤ now (external lane); drain()
 
-dispatch(event):
-    queue := [event]
-    while queue not empty:
-        ev := pop front; now := clock()
-        output := target(ev).Update(now, ev)
-        for each item in order:
-            if routed → push back to queue as event
-            if fact   → bus.Publish(fact)               // every subscriber, before the next item
-            else      → executor.Run(item)              // goroutine; result comes back later
+drain():
+    while item := queue.Pop():                         // internal lane first, then external, FIFO within a lane
+        stamp item.At = clock() ; recorder.Record(item) if set
+        switch item.Kind:
+            input, result, tick, routed → output := target(item).Update(item.At, item.Payload)
+                                         push each output item to the internal lane, in order
+                                         // results and routed items for removed locks are dropped
+            fact   → bus.Publish(item)                 // every subscriber, synchronously
+            effect → executor.Run(item)                // goroutine; its result is pushed to the external lane
 ```
 
-- **Tick is idempotent**: a model may get a heartbeat and a `Due` tick close together; `Tick` only runs schedules that are due, so a second one does nothing. The heartbeat is a fixed 1 s ticker (as today's), so a schedule a reducer forgot to report in `Due()` is late by at most 1 s however busy the loop is. `Due()` exists for sub-second schedules (local command retries after 0.5 s).
-- Routed effects are processed in the same round, FIFO, so "lock asks account, account answers from its shared result" completes without a timer turn.
-- **Channels.** The inbox is buffered (1,024). `Submit` also keeps a per-lock count of edge events not yet handled (in the inbox or deferred inside the model, §6.2); above 64 for one lock (today's per-lock queue) it returns `ErrBusy` for that lock only. Results: only executor goroutines send to the results channel and may block until the loop takes the result; the loop never sends to either channel, so it cannot block on them.
+- **Tick is idempotent**: a model may get a heartbeat and a `Due` tick close together; `Tick` only runs schedules that are due, so a second one does nothing. `Due()` serves sub-second schedules (local command retries after 0.5 s); the fixed 1 s heartbeat (as today's ticker) is the safety net.
+- **One queue, two lanes.** Everything the loop handles is an envelope on one queue. The **internal lane** holds what the loop itself produced (routed effects, facts, I/O effects) and is always drained before the next external item, so a fact is out and an effect has started before any new input is looked at, and a routed answer arrives in the same round. The **external lane** holds edge input, executor results and ticks, FIFO.
+- **Unbounded, but bounded in practice.** Neither lane has a capacity, so the loop can never block on its own queue. Only edge input is admission-controlled: `Submit` keeps a per-lock count of edge events not yet handled (queued or deferred inside the model, §6.2) and above 64 for one lock (today's per-lock queue) returns `ErrBusy` for that lock only. Everything else is bounded by what is already admitted: results by the effects in flight, internal items by the finite output of each `Update`.
+- **Notify.** Pushing is a mutex-protected append plus a non-blocking send on a 1-slot notify channel; executor goroutines therefore never block on the loop.
+- **Recorder.** The pop order is the complete, total order of everything that happened. An optional `Recorder` sees every popped envelope: a per-lock ring buffer of the last N envelopes for diagnostics, or a full log in tests, which replays exactly by feeding the recorded inputs, results and ticks back into `Update`. Payloads are redacted per kind under the CLAUDE.md no-secrets rules (no tokens, keys, signed commands, URLs, webhook bodies). No recorder runs in production unless enabled.
 
 ### 5.3 Effect catalogue
 
@@ -207,7 +216,7 @@ Reducers report what happened as facts; subscribers decide what that means for t
 Rules:
 
 - **On the loop, in order.** `bus.Publish` calls every subscriber synchronously, in registration order (MQTT, Directory, Logger), before the loop handles the next item. A lock's facts therefore reach every subscriber in the order its reducer produced them, so Home Assistant never sees `locked` before the `moving` that preceded it.
-- **One-way.** Subscribers never call back into the program or a reducer and emit no effects. A subscriber that one day must tell the reducers something submits an ordinary edge event through the inbox; none does in this design.
+- **One-way.** Subscribers never call back into the program or a reducer and emit no effects. A subscriber that one day must tell the reducers something submits an ordinary edge event; none does in this design.
 - **Bounded.** A subscriber must return quickly. The MQTT publisher's worst case is in §8.3. Everything slower runs in the subscriber's own goroutines.
 - **No secrets.** Facts carry the same data the topics carry today. `Log` attributes follow the existing no-secrets rules; the logger subscriber adds nothing.
 
@@ -228,7 +237,7 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 | Group (file) | Contents (today's fields) |
 |---|---|
 | `identity` (`model.go`) | id, `Target` (record with lock settings applied, own webhook URL), setting, token expiry, `recordGen` |
-| `conn` (`mode.go`) | mode, the entering-local phase (§6.2), failure counters (probe, HTTP, cloud probe, cloud API), schedules (`nextProbe`, `nextCloudProbe`, `nextReconcile`, `nextCloudPoll`, `nextOfflineRetry`, `lastUnknownCheck`), `bridgeUsable` |
+| `conn` (`mode.go`) | mode, the entering-local phase (§6.2), failure counters (probe, HTTP, cloud probe, cloud API), schedules as `timer.Deadline`s (probe, cloud probe, reconcile, cloud poll, offline retry, unknown recheck), `bridgeUsable` |
 | `doc` (`state.go`) | published `model.State`, `lastFreshAt`, `lastEventAt`, `lastStatusStartedAt`, `lastPollAt`, `lastCloudEventAt`, `lastBoltEventAt` |
 | `confirm` (`confirm.go`) | confirmation target/timers, cloud confirmation, retried/rechecked flags, `movement` |
 | `delivery` (`delivery.go`) | bridge webhook delivery: `webhookConfirmed`, `lastBridgeEventAt`, `nextUnconfirmedRead`, bridge check |
@@ -237,7 +246,7 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 | `cmds` (`pipeline.go`) | command pipeline: active, pending, watch, held-for-resolution flag |
 | `hooks` (`setwebhooks.go`, `webhooklist.go`) | webhook list, revision, SetWebhooks job and queue (`planWebhooks`, `webhookRevision` moved unchanged) |
 | `io` (`slots.go`) | in-flight effects: the bridge slot and its queue, the cloud read slot, the refresh slot, probe refs, deferred edge events |
-| `warn` (`warn.go`) | rate-limited warnings (the 10 min repeat window) |
+| `warn` (`warn.go`) | rate-limited warnings: a `timer.Limiter` (the 10 min repeat window) |
 
 ### 6.1 Lock events
 
@@ -254,6 +263,8 @@ The `Supervisor` fields become named groups. Each group lives in its own file wi
 | result events (§5.3) and `ReadResult`, `CommandResult`, `RefreshResult` | executor / account | Matched by `Ref` to the waiting operation (§6.2). |
 
 ### 6.2 I/O slots, operations and the entering-local phase
+
+Confirmation timers (`confirmAt`, `cloudConfirmAt`, the bridge check, the already-there settle) are `timer.Deadline`s, local retries a `timer.Backoff`, and the event-feed, status-event and status-move ages `timer.Window`s.
 
 Today's call chains (`tryEnterLocal` → status → `registerWebhook` → list → delete → create → re-read) become **operations**: small records in the model that remember why an effect was emitted and what to do with its result.
 
@@ -369,8 +380,8 @@ Owns everything shared by all locks: the budget, the token in use, shared read r
 | `token` | token in use (or none), state `none · resolving · ready`, waiters, expiry |
 | `reads` | read being prepared or in flight (ref, priority, started, the budget version of its call), waiters (lock, priority, notBefore), last result (`LockList`) |
 | `commands` | cloud commands waiting for a token, in flight (ref → lock, retried-after-401 flag) |
-| `refresh` | per lock+reason backoff (5 min doubling to 6 h), the refresh-all job, waiters, cache `FetchedAt` |
-| `schedules` | next token expiry check (at start, then hourly), next cache-age check (hourly when `cache_max_age` > 0) |
+| `refresh` | per lock+reason `timer.Backoff` (5 min doubling to 6 h), the refresh-all job, waiters, cache `FetchedAt` |
+| `schedules` | `timer.Deadline`s: token expiry check (at start, then hourly), cache-age check (hourly when `cache_max_age` > 0) |
 
 ### 7.1 Token first, then budget, persisted before the read
 
@@ -462,7 +473,7 @@ Unbudgeted and never queued behind reads: a `CommandRequest` waits only for a to
 
 - One goroutine per asynchronous effect, with a context derived from the program context and the effect's deadline or timeout. No pools: in-flight effects are bounded by the slots in §6.2 and §7 (per lock: one bridge call, two probes, one read request, one refresh; account: one read, one token operation, one budget save, one merge, the cloud commands in flight).
 - `ErrNotAttempted`: before dialing a command (bridge or cloud), the goroutine checks its absolute deadline, after any lock it must hold.
-- Results are sent to the loop's results channel; on shutdown they are dropped.
+- Results are pushed to the queue's external lane; on shutdown they are dropped.
 
 ### 8.2 Bridge clients
 
@@ -516,16 +527,29 @@ Cancelling the program context: the loop stops; the executor cancels in-flight e
 ## 11. Behaviour (BDD skeleton)
 
 ```
+engine.Queue
+    PushExternal
+        With 64 unhandled edge events for that lock
+            - returns ErrBusy for that lock only
+        Otherwise
+            - appends to the external lane and signals Notify without blocking
+    PushInternal
+        - appends to the internal lane; never fails, never blocks
+    Pop
+        - returns internal items first, then external ones, FIFO within a lane
+
 engine.Program
     Run
         On an edge event
             - stamps it with the clock's now and routes it to its lock's Update
         On a routed effect
-            - delivers it to the target reducer in the same dispatch round, after the items before it
+            - delivers it to the target reducer before any external item, after the items before it
         On a fact
-            - hands it to every bus subscriber, in registration order, before the next item
+            - hands it to every bus subscriber, in registration order, before any external item
         On an I/O effect
-            - starts it on the executor without waiting
+            - starts it on the executor without waiting, before any external item
+        With a Recorder
+            - records every popped envelope in pop order, payloads redacted
         On a result for a removed lock
             - drops it
         On the heartbeat
@@ -545,6 +569,21 @@ engine.Program
     LocksRemoved
         - deletes the models and their deferred events, calls Directory.Remove
         - starts OnRemoved in a goroutine
+
+timer.Deadline
+    - is due at and after its armed time, never when disarmed
+    - Next returns the armed time, zero when disarmed
+
+timer.Backoff
+    - spaces attempts by its steps, then repeats the last (or doubles up to max)
+    - Reset returns to the first step
+
+timer.Limiter
+    - allows the first message per key, then suppresses repeats within the window
+    - reports the suppressed count with the next allowed message
+
+timer.Window
+    - reports whether an age is within the window; a zero window is never within
 
 engine.RunSync
     - runs the effects of one event against the executor until no effect is pending
@@ -694,7 +733,7 @@ lock.Model.Update
             - queues the request
         - otherwise checks, plans and steps exactly as gateway 5.9; steps use the bridge slot and wait while a command is busy
     Due
-        - returns the earliest of the model's schedules and the next local retry
+        - returns the minimum Next() of the model's timer helpers
 
 account.Model.Update
     ReadRequest
@@ -785,6 +824,8 @@ mqtt.Client
 - **Scenario harness** (`engine/lock/harness_test.go`): the ported harness keeps today's verbs (`start`, `advance`, `send`, `command`, `toCloud`). It runs a lock model plus a real account model with a **synchronous fake executor** (the same `RunSync` mechanism) that resolves each effect against the existing `fakeBridge`/`fakeCloud` and feeds the result back until quiescent; `fakePub` becomes a recording bus subscriber, so assertions on published state, events and command status port unchanged. A **held** mode keeps chosen effects pending so tests can interleave: a command during a status read, a cloud poll answered after a newer `/status`, a confirmation purpose arising while a read is in flight, events during entering local, a refund save overtaken by a re-take.
 - **White-box assertions.** About 117 references in today's gateway tests read `Supervisor` fields directly. They are rewritten against the new model's groups or against facts; "line for line" applies to the scenarios, not to those assertions, and the port budgets for that rewrite.
 - **Invariant checks**: a harness hook validates every output list: no `BridgeCommand` after a no-response/answer result for the same command, no two bridge effects in flight per lock, no budget take without a token, no `ListLocks` before a completed save that includes its call, at most one `SaveBudget` in flight, no command effect past its deadline.
+- **Timer tests** (`engine/timer`): table tests per helper, including the exact windows and backoff steps of today's code.
+- **Queue and recorder tests** (`engine`): lane order, per-lock admission, no blocking under concurrent pushes (`-race`), a recorded run replayed into fresh models gives the same output.
 - **Program tests** (`engine`): routing, ordering of routed effects and facts, per-lock `ErrBusy`, removal dropping results and deferred events, heartbeat under a constant event stream, `Due` timer, shutdown; run with `-race -count=5`.
 - **Subscriber tests** (`engine/out`): every fact maps to today's topic, payload and retain flag (compared with today's `internal/mqtt` tests); not-connected drop; outcome warnings for a withheld PUBACK (timeout), rate-limited; facts reach subscribers in order.
 - **Executor tests** (`engine/exec`): `ErrNotAttempted` (including a deadline passing while waiting for the bridge mutex), the per-lock bridge mutex never contended under the reducer, one result per effect, `MergeLocks` targets.
@@ -812,7 +853,7 @@ Example: UNLOCK, then LOCK, with the bridge down. Today the door unlocks via the
 
 ## 14. Migration (big-bang)
 
-1. **Engine PRs** (new packages only, not wired): `effect` + `engine` loop + `bus` + `RunSync`; `engine/out` (MQTT publisher, logger); `engine/account` (budget, reads, token, commands, refresh) with ported `budget_test.go`, `cloudhub_test.go`, `refresher_test.go`; `engine/lock` in slices (mode + doc + slots + entering local; pipeline; confirmation + status hint + event feed; registration + delivery; SetWebhooks + list); `engine/exec`; `mqtt` client changes (§8.3: `WriteTimeout`, token-returning `Publish*` with the not-connected guard, per-topic `retainMu`; the old gateway keeps waiting on the token until the swap) and the stall measurement.
+1. **Engine PRs** (new packages only, not wired): `timer`; `effect` + `engine` loop, queue, envelope and recorder + `bus` + `RunSync`; `engine/out` (MQTT publisher, logger); `engine/account` (budget, reads, token, commands, refresh) with ported `budget_test.go`, `cloudhub_test.go`, `refresher_test.go`; `engine/lock` in slices (mode + doc + slots + entering local; pipeline; confirmation + status hint + event feed; registration + delivery; SetWebhooks + list); `engine/exec`; `mqtt` client changes (§8.3: `WriteTimeout`, token-returning `Publish*` with the not-connected guard, per-topic `retainMu`; the old gateway keeps waiting on the token until the swap) and the stall measurement.
 2. **Test port map** (old → new; every test name kept or mapped in the PR description):
 
    | Today's test file | Tests | Target |
