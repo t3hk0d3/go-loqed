@@ -62,7 +62,7 @@ func (s *Supervisor) publishWebhooks(hooks []bridge.Webhook) {
 	}
 	s.hooks, s.hookList = hooks, &l
 	if err := s.d.Publisher.PublishWebhooks(s.id, l); err != nil {
-		s.log.Warn("publishing the bridge webhook list failed", "err", err)
+		s.warn("publishing the bridge webhook list failed", "err", err)
 	}
 }
 

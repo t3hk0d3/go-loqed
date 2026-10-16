@@ -91,6 +91,8 @@ type Deps struct {
 	TokenExpiry func() (time.Time, bool)
 	Now         func() time.Time
 	Log         *slog.Logger
+	// Go runs a cloud read off the supervisor goroutine (nil: a goroutine).
+	Go func(func())
 }
 
 type Timing struct {
@@ -213,6 +215,13 @@ type Supervisor struct {
 	move              movement        // expected bolt movement (for /status hints)
 	lastBoltEventAt   time.Time       // last webhook that set the bolt state
 
+	// Cloud reads run off the loop (spec: non-blocking supervisor 4.2).
+	read     chan cloudRead // the read in flight; nil when none
+	readPrio Priority       // its priority
+	queued   *cloudRequest  // the next read, merged from requests meanwhile
+
+	lastStatusAt     time.Time // start of the last successful /status read
+	lastMayMoveAt    time.Time // last command request that may have moved the lock without an answer
 	lastFreshAt      time.Time // last fresh bolt data (status, poll, event)
 	lastEventAt      time.Time // last applied lock event
 	lastPollAt       time.Time // last successful cloud poll
@@ -236,6 +245,9 @@ func NewSupervisor(rec store.LockRecord, setting config.LockSetting, d Deps, t T
 		warned: map[string]*warnState{},
 	}
 	s.cmds.s = s
+	if s.d.Go == nil {
+		s.d.Go = func(f func()) { go f() }
+	}
 	return s
 }
 
@@ -359,6 +371,8 @@ func (s *Supervisor) Run(ctx context.Context) {
 			s.stepWebhooks(ctx)
 		case m := <-s.in:
 			s.handle(ctx, m)
+		case r := <-s.read:
+			s.applyCloudRead(ctx, r)
 		}
 	}
 }
@@ -377,7 +391,7 @@ func (s *Supervisor) tick(ctx context.Context) {
 	now := s.d.Now()
 	if !s.cloudConfirmAt.IsZero() && !now.Before(s.cloudConfirmAt) {
 		s.cloudConfirmAt = time.Time{}
-		s.pollCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
+		s.requestCloud(ctx, PriorityConfirm, s.cloudConfirmSince)
 	}
 	switch s.mode {
 	case model.ModeLocal:
@@ -422,11 +436,11 @@ func (s *Supervisor) publish() {
 		}
 	}
 	if err := s.d.Publisher.PublishState(s.id, s.state); err != nil {
-		s.log.Warn("publishing state failed", "err", err)
+		s.warn("publishing state failed", "err", err)
 	}
 	avail := s.available()
 	if err := s.d.Publisher.PublishAvailability(s.id, avail); err != nil {
-		s.log.Warn("publishing availability failed", "err", err)
+		s.warn("publishing availability failed", "err", err)
 	}
 	s.mu.Lock()
 	s.health = Health{Mode: s.mode, Available: avail, LastEventAt: s.state.LastEventAt}
@@ -494,7 +508,7 @@ func (s *Supervisor) recordEvent(now time.Time, eventType string, key *int, clou
 		ev.Source = model.Ptr(model.SourceGateway)
 	}
 	if err := s.d.Publisher.PublishEvent(s.id, ev); err != nil {
-		s.log.Warn("publishing event failed", "err", err)
+		s.warn("publishing event failed", "err", err)
 	}
 }
 
@@ -536,7 +550,7 @@ func (s *Supervisor) commandFailed(c model.Command, class string, err error) {
 	s.log.Error("lock command failed", "command", c, "error_class", class, "err", err)
 	ev := model.Event{EventType: model.EventCommandFailed, Reason: string(c), Source: model.Ptr(model.SourceGateway), Error: class}
 	if perr := s.d.Publisher.PublishEvent(s.id, ev); perr != nil {
-		s.log.Warn("publishing event failed", "err", perr)
+		s.warn("publishing event failed", "err", perr)
 	}
 }
 

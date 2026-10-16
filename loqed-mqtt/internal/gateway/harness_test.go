@@ -134,7 +134,7 @@ func (f *fakeCloud) Locks(_ context.Context, p Priority, notBefore time.Time) (L
 	if at.IsZero() {
 		at = f.now()
 	}
-	return LockList{Locks: f.locks, FetchedAt: at}, nil
+	return LockList{Locks: slices.Clone(f.locks), FetchedAt: at}, nil // a held read keeps what it fetched
 }
 
 func (f *fakeCloud) Command(ctx context.Context, _ string, s loqed.BoltState) error {
@@ -151,6 +151,7 @@ type fakePub struct {
 	statuses []model.CommandStatus
 	lists    []model.WebhookList
 	results  []model.WebhooksResult
+	onStatus func(model.CommandStatus) // runs inside PublishCommandStatus (a slow broker)
 }
 
 func (f *fakePub) PublishWebhooks(_ string, l model.WebhookList) error {
@@ -165,6 +166,9 @@ func (f *fakePub) PublishWebhooksResult(_ string, r model.WebhooksResult) error 
 
 func (f *fakePub) PublishCommandStatus(_ string, s model.CommandStatus) error {
 	f.statuses = append(f.statuses, s)
+	if f.onStatus != nil {
+		f.onStatus(s)
+	}
 	return nil
 }
 
@@ -204,6 +208,7 @@ type harness struct {
 	refreshes     []Reason
 	newBridgeErr  error
 	bridgesBuilt  int
+	holdReads     bool // leave finished cloud reads unapplied until releaseReads
 	s             *Supervisor
 }
 
@@ -247,6 +252,7 @@ func newHarness(t *testing.T, rec store.LockRecord, setting config.LockSetting, 
 		WebhookURL: func(r store.LockRecord) (string, error) { return "http://10.0.0.5:8099/webhook/" + r.ID, nil },
 		Now:        func() time.Time { return h.now },
 		Log:        slog.New(slog.DiscardHandler),
+		Go:         func(f func()) { f() }, // a read runs at once; pump applies its result
 	}
 	for _, f := range tweak {
 		f(&d)
@@ -255,9 +261,28 @@ func newHarness(t *testing.T, rec store.LockRecord, setting config.LockSetting, 
 	return h
 }
 
-func (h *harness) start()                  { h.s.start(context.Background()) }
-func (h *harness) advance(d time.Duration) { h.now = h.now.Add(d); h.s.tick(context.Background()) }
-func (h *harness) send(msg any)            { h.s.handle(context.Background(), msg) }
+func (h *harness) start() { h.s.start(context.Background()); h.pump() }
+func (h *harness) advance(d time.Duration) {
+	h.now = h.now.Add(d)
+	h.s.tick(context.Background())
+	h.pump()
+}
+func (h *harness) send(msg any) { h.s.handle(context.Background(), msg); h.pump() }
+
+// pump applies finished cloud reads like Run does, unless they are held.
+func (h *harness) pump() {
+	for !h.holdReads && h.s.read != nil {
+		select {
+		case r := <-h.s.read:
+			h.s.applyCloudRead(context.Background(), r)
+		default:
+			return
+		}
+	}
+}
+
+// releaseReads stops holding cloud reads and applies the finished ones.
+func (h *harness) releaseReads() { h.holdReads = false; h.pump() }
 
 // command sends a command that arrived over MQTT just now.
 func (h *harness) command(c model.Command) { h.send(CommandMsg{Command: c, At: h.now}) }

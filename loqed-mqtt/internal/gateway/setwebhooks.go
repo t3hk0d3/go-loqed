@@ -321,7 +321,7 @@ func addedIDs(after []bridge.Webhook, before map[int]bool, created []string) []i
 
 func (s *Supervisor) webhooksResult(r model.WebhooksResult) {
 	if err := s.d.Publisher.PublishWebhooksResult(s.id, r); err != nil {
-		s.log.Warn("publishing the SetWebhooks result failed", "err", err)
+		s.warn("publishing the SetWebhooks result failed", "err", err)
 	}
 }
 

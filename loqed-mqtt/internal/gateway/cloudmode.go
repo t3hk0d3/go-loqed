@@ -21,7 +21,7 @@ func (s *Supervisor) enterCloud(ctx context.Context) {
 	s.confirmAt, s.confirmViaCloud = time.Time{}, false
 	s.state.StateStale = true
 	s.publish()
-	s.pollCloud(ctx, PriorityBackground, time.Time{})
+	s.requestCloud(ctx, PriorityBackground, time.Time{})
 }
 
 func (s *Supervisor) bridgeProbeSchedule(now time.Time) {
@@ -62,12 +62,12 @@ func (s *Supervisor) tickCloud(ctx context.Context, now time.Time) {
 	}
 	if !now.Before(s.nextCloudPoll) {
 		s.nextCloudPoll = s.nextPollTime(now)
-		s.pollCloud(ctx, PriorityBackground, time.Time{})
-		if s.mode != model.ModeCloud {
-			return
-		}
+		s.requestCloud(ctx, PriorityBackground, time.Time{})
 	}
-	s.checkFreshness(now)
+	// A read about to land may refresh the data: check after it (applyCloudRead).
+	if s.read == nil {
+		s.checkFreshness(now)
+	}
 }
 
 // pushActive: cloud webhooks are configured and have been seen recently.
@@ -130,12 +130,72 @@ func (s *Supervisor) probeCloud(ctx context.Context) error {
 	return s.d.ProbeCloud(c)
 }
 
-// pollCloud reads the lock from the cloud. It returns true on fresh data.
-func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.Time) bool {
-	list, err := s.d.Cloud.Locks(ctx, p, notBefore)
-	if ctx.Err() != nil {
-		return false
+// cloudRequest is a cloud read the supervisor wants.
+type cloudRequest struct {
+	p         Priority
+	notBefore time.Time
+}
+
+// cloudRead is a finished cloud read.
+type cloudRead struct {
+	req  cloudRequest
+	list LockList
+	err  error
+}
+
+// requestCloud asks for a cloud read without waiting for it. One read is in
+// flight at a time; requests meanwhile merge into the next one: a
+// confirmation read replaces a background poll, and of two confirmation
+// reads the later notBefore wins.
+func (s *Supervisor) requestCloud(ctx context.Context, p Priority, notBefore time.Time) {
+	r := cloudRequest{p: p, notBefore: notBefore}
+	if s.read == nil {
+		s.startRead(ctx, r)
+		return
 	}
+	if r.p == PriorityBackground && s.readPrio == PriorityBackground {
+		return // the background read in flight is this poll
+	}
+	switch q := s.queued; {
+	case q == nil, q.p != PriorityConfirm && r.p == PriorityConfirm:
+		s.queued = &r
+	case q.p == PriorityConfirm && r.p == PriorityConfirm && r.notBefore.After(q.notBefore):
+		q.notBefore = r.notBefore
+	}
+}
+
+// startRead runs one read through Deps.Go. The result channel is buffered,
+// so the read can always finish, even after the supervisor stopped.
+func (s *Supervisor) startRead(ctx context.Context, r cloudRequest) {
+	ch := make(chan cloudRead, 1)
+	s.read, s.readPrio = ch, r.p
+	s.d.Go(func() {
+		list, err := s.d.Cloud.Locks(ctx, r.p, r.notBefore)
+		ch <- cloudRead{req: r, list: list, err: err}
+	})
+}
+
+// applyCloudRead applies a finished read on the supervisor goroutine, then
+// starts the queued read, if any.
+func (s *Supervisor) applyCloudRead(ctx context.Context, r cloudRead) {
+	s.read = nil
+	if ctx.Err() != nil {
+		return
+	}
+	s.applyCloudResult(ctx, r.req.p, r.list, r.err)
+	if q := s.queued; q != nil {
+		s.queued = nil
+		if q.p != PriorityBackground || s.mode != model.ModeLocal { // local mode does not poll
+			s.startRead(ctx, *q)
+		}
+	}
+	if s.mode == model.ModeCloud && s.read == nil {
+		s.checkFreshness(s.d.Now())
+	}
+}
+
+// applyCloudResult applies one read's outcome. It returns true on fresh data.
+func (s *Supervisor) applyCloudResult(ctx context.Context, p Priority, list LockList, err error) bool {
 	switch {
 	case errors.Is(err, ErrDeferred):
 		return false // freshness tracking marks the state stale if this lasts
@@ -162,7 +222,14 @@ func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.T
 			s.bridgeProbeSchedule(now)
 			s.nextCloudProbe, s.nextCloudPoll = now.Add(s.t.Liveness), now.Add(s.t.CloudPoll)
 		}
-		s.applyCloudLock(ctx, now, l, list.FetchedAt, p == PriorityConfirm)
+		// A confirmation read counts only for the confirmation it was made
+		// for: one fetched before the current confirmation began is a plain
+		// read (it may predate the command it would otherwise confirm).
+		confirming := p == PriorityConfirm && !list.FetchedAt.Before(s.cloudConfirmSince)
+		// In local mode the bridge is the source; only a confirmation read
+		// (a fallback after a failed /status) may set the bolt state.
+		bolt := s.mode != model.ModeLocal || confirming
+		s.applyCloudLock(ctx, now, l, list.FetchedAt, confirming, bolt)
 		s.publish()
 		return true
 	}
@@ -171,12 +238,15 @@ func (s *Supervisor) pollCloud(ctx context.Context, p Priority, notBefore time.T
 }
 
 // applyCloudLock applies polled data. Bolt data older than the last applied
-// event is ignored (a poll never overwrites newer webhook state). A missing
+// event, the last /status read or the last command request that may have
+// moved the lock is ignored (a poll, which may finish late, never overwrites
+// newer state or clears a "may have moved" stale mark), as is bolt data when
+// bolt is false. A missing
 // online field keeps the previous value. A confirmation poll that still shows
 // the pre-command state (the cloud lags) is published as stale and retried
 // once.
-func (s *Supervisor) applyCloudLock(ctx context.Context, now time.Time, l cloud.Lock, fetchedAt time.Time, confirming bool) {
-	if !fetchedAt.Before(s.lastEventAt) {
+func (s *Supervisor) applyCloudLock(ctx context.Context, now time.Time, l cloud.Lock, fetchedAt time.Time, confirming, bolt bool) {
+	if bolt && !fetchedAt.Before(s.lastEventAt) && !fetchedAt.Before(s.lastStatusAt) && !fetchedAt.Before(s.lastMayMoveAt) {
 		s.state.BoltState = l.BoltState
 		s.state.Lock = model.LockStateFor(l.BoltState)
 		if confirming {

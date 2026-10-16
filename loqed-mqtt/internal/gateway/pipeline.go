@@ -216,8 +216,15 @@ func (p *commandPipeline) attemptLocal(ctx context.Context, now time.Time, a *co
 	a.localAttempts++
 	a.status = model.StatusSending
 	p.publish(now, a)
+	// The publish may have taken a while: no attempt starts after the cutoff
+	// (spec 5.8). The cloud attempt may still be in time.
+	if now = s.d.Now(); !now.Before(a.cutoff) {
+		a.attempts--
+		a.localAttempts--
+		return true
+	}
 	// End by the local cutoff: a bridge that hangs must leave the cloud
-	// attempt its time.
+	// attempt its time. The remaining time is measured right before the call.
 	rc, cancel := context.WithTimeout(ctx, min(s.t.RequestTimeout, a.cutoff.Sub(now)))
 	err := s.bridge.Command(rc, actionFor(a.cmd))
 	cancel()
@@ -278,6 +285,11 @@ func (p *commandPipeline) attemptCloud(ctx context.Context, now time.Time, a *co
 	a.attempts++
 	a.status = model.StatusSending
 	p.publish(now, a)
+	if now = s.d.Now(); !now.Before(a.deadline) { // the publish took the rest of the time
+		a.attempts--
+		p.fail(ctx, now, a, model.FailExpired, errors.New("deadline passed before the command could be sent"))
+		return
+	}
 	cctx, cancel := context.WithTimeout(ctx, a.deadline.Sub(now))
 	err := s.d.Cloud.Command(cctx, s.id, a.target())
 	cancel()
@@ -331,6 +343,7 @@ func (p *commandPipeline) sent(now time.Time, a *command, via model.Via) {
 // unchanged, is stale until something shows where the bolt is.
 func (p *commandPipeline) mayHaveMoved(now time.Time, a *command) {
 	s := p.s
+	s.lastMayMoveAt = now // cloud data fetched before this no longer shows where the bolt is
 	if s.state.BoltState == a.target() {
 		return
 	}
@@ -489,7 +502,7 @@ func (p *commandPipeline) publish(now time.Time, a *command) {
 		st.Error = model.Ptr(a.errClass)
 	}
 	if err := p.s.d.Publisher.PublishCommandStatus(p.s.id, st); err != nil {
-		p.s.log.Warn("publishing command status failed", "err", err)
+		p.s.warn("publishing command status failed", "err", err)
 	}
 }
 
