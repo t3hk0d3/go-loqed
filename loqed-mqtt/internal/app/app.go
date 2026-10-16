@@ -52,10 +52,7 @@ const missingLockRefreshAge = 12 * time.Hour
 // or a fatal error occurs.
 func Run(ctx context.Context, o Options) error {
 	cfg, log := o.Config, o.Log
-	now := o.Now
-	if now == nil {
-		now = time.Now
-	}
+	now := clockOr(o.Now)
 	cloudBase, portalBase := o.CloudBaseURL, o.PortalBaseURL
 	if cloudBase == "" {
 		cloudBase = cloud.DefaultBaseURL
@@ -268,6 +265,17 @@ func Run(ctx context.Context, o Options) error {
 		return cause
 	}
 	return nil
+}
+
+// clockOr returns now, or time.Now. Its values carry Go's monotonic clock
+// reading, so every deadline, timeout and window derived from them with Add
+// ignores wall-clock steps (NTP corrections); see the monotonic-time guard
+// test in internal/gateway.
+func clockOr(now func() time.Time) func() time.Time {
+	if now == nil {
+		return time.Now
+	}
+	return now
 }
 
 func forwardCommands(ctx context.Context, mq *mqtt.Client, m *gateway.Manager, log *slog.Logger) {

@@ -286,3 +286,29 @@ func TestRepublishNeverSendsAnOlderValueAfterANewerOne(t *testing.T) {
 		}
 	})
 }
+
+// fakeMessage is an incoming MQTT message.
+type fakeMessage struct {
+	topic   string
+	payload []byte
+}
+
+func (m fakeMessage) Duplicate() bool   { return false }
+func (m fakeMessage) Qos() byte         { return 1 }
+func (m fakeMessage) Retained() bool    { return false }
+func (m fakeMessage) Topic() string     { return m.topic }
+func (m fakeMessage) MessageID() uint16 { return 1 }
+func (m fakeMessage) Payload() []byte   { return m.payload }
+func (m fakeMessage) Ack()              {}
+
+func TestCommandArrivalTimeCarriesMonotonicReading(t *testing.T) {
+	fp := &fakePaho{open: true}
+	c, _ := newFakeClient(t, fp, mqtt.ClientConfig{}) // default clock
+	defer c.Close()
+	c.SetLocks([]mqtt.LockInfo{{ID: "lock1"}}, nil)
+	c.Command(fakeMessage{topic: "loqed/lock1/command", payload: []byte("OPEN")})
+	cmd := <-c.Commands()
+	if s := cmd.At.String(); !strings.Contains(s, "m=") {
+		t.Fatalf("Command.At %q has no monotonic reading; the command deadline would follow wall-clock steps", s)
+	}
+}
