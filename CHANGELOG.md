@@ -14,6 +14,12 @@ library are listed here. The format follows
   a command a second time. This also stops a captured webhook from being
   resent within the timestamp window.
 
+- A slow or unresponsive MQTT broker, or a slow LOQED cloud request for
+  another lock, no longer delays lock commands, and a command is never sent
+  after its deadline (for example an OPEN that could no longer reach the
+  lock within 10 seconds). Commands are timed with the system's monotonic
+  clock, so a clock correction cannot stretch or shorten them.
+
 - After a lock command that got no response (it may have moved the lock),
   the state is marked stale, and a delayed bridge status still showing the
   old position no longer clears that: Home Assistant no longer shows, for

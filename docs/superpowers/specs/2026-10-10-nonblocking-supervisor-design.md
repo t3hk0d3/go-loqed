@@ -23,7 +23,7 @@ Consequences: a slow or half-dead broker, or another lock's slow cloud read, del
 The per-lock loop never waits for MQTT acknowledgements or for cloud reads. A command waits at most for its own lock's bridge call (or cloud command) already in progress. No attempt starts after its cutoff or deadline, measured on the monotonic clock.
 
 - A broker that withholds PUBACKs does not delay any lock's command or event handling.
-- One lock's slow cloud read does not delay another lock's commands, events or reads, and does not delay its own commands.
+- One lock's slow cloud read does not delay another lock's commands or events, nor its own. Another lock's read still waits for the shared read behind the hub's semaphore (gateway 5.6), but off that lock's loop.
 - With a stuck MQTT socket, a publish blocks its caller for at most `WriteTimeout` (2 s) per handoff.
 - A wall-clock step (NTP correction, a host booting without RTC) changes no deadline, cutoff, timeout or window measured inside the process.
 - All safety invariants in CLAUDE.md hold unchanged; MQTT topics and payloads are unchanged.
@@ -55,24 +55,24 @@ The per-lock loop never waits for MQTT acknowledgements or for cloud reads. A co
 1. **One read in flight per lock.** `Supervisor.requestCloud(p Priority, notBefore time.Time)` replaces the direct `pollCloud` calls in `enterCloud`, `tickCloud` (background poll) and `tick` (confirmation poll). If no read is in flight it starts one through `Deps.Go` (default: a plain goroutine) that calls `Deps.Cloud.Locks(ctx, p, notBefore)` and sends the result to a result channel with buffer 1 — the read's future — so the goroutine can always finish, even after the supervisor stopped.
 2. **Loop.** `Run` selects on the in-flight read's channel next to `s.in` and the timers (a nil channel when nothing is in flight). The result is applied on the loop by the existing logic (today's `pollCloud` after the call, renamed `applyCloudRead`): error classes, `markStale`, `cloudAPIFailures`, offline transition, `applyCloudLock`. Then the in-flight read is cleared and a queued request, if any, starts.
 3. **Requests while a read is in flight** are merged into one queued request, started when the current read finishes: a confirmation read wins over a background poll; for two confirmation reads the later `notBefore` wins. A queued background poll is dropped when a confirmation read is queued. Each started read goes through `CloudHub.Locks` with its own priority, exactly as today.
-4. **Freshness across feeds.** A read now finishes later than the events around it, so it can carry data older than a `/status` read made meanwhile (for example after the lock went back to local mode). `applyCloudLock` therefore sets the bolt state and clears `state_stale` only if the list was fetched at or after both `lastEventAt` (today's guard) and `lastStatusAt`, the start time of the last successful `/status` read, which `readStatus` and `tryEnterLocal` now record. Battery and online status apply as today. A confirmation read that the guard rejects counts as "not yet showing the target" (today's lagging-cloud branch).
+4. **Freshness across feeds.** A read now finishes later than the events around it, so it can carry data older than a `/status` read made meanwhile (for example after the lock went back to local mode). `applyCloudLock` therefore sets the bolt state and clears `state_stale` only if the list was fetched at or after both `lastEventAt` (today's guard) and `lastStatusAt`, the start time of the last successful `/status` read, which `readStatus` and `tryEnterLocal` now record. Battery and online status apply as today. A confirmation read that the guard rejects is ignored, like today's `lastEventAt` guard: the newer `/status` or event has already been applied, and the command's own confirmation timer still runs.
 5. **Mode changes while a read is in flight** need no further special case: the result is applied with today's rules in whatever mode the lock is in when it arrives, behind the guard of item 4. `ModeOffline` → `ModeCloud` on fresh data stays as is.
 6. **Shutdown.** Cancelling the context ends `CloudHub.Locks`; the goroutine writes into the buffered channel and exits; `Run` has returned and the result is discarded.
-7. **Freshness tracking.** A read in flight does not count as fresh data; `checkFreshness` and `state_stale` behave as today.
+7. **Freshness tracking.** A read in flight does not count as fresh data. `checkFreshness` is skipped while a read is in flight and runs right after the read is applied, so a poll that is about to land (at most 15 s away) does not flash `state_stale`.
 
 ### 4.3 Deadline re-check (COR M1, `pipeline.go`)
 
-Immediately before the network call, `attemptLocal` and `attemptCloud` read the clock again (after the `sending` publish). If the local cutoff (local attempt) or the deadline (cloud attempt) has passed, the attempt is not made: the command fails `expired` with the existing message, exactly like the checks before the attempt. Request contexts use `context.WithDeadline` with absolute times: local `min(now+RequestTimeout, cutoff)`, cloud `deadline`. "No attempt starts after its deadline" (gateway 5.8) then holds regardless of how long anything before the call took; a request that started in time may still finish after the deadline, as today.
+Immediately before the network call, `attemptLocal` and `attemptCloud` read the clock again (after the `sending` publish). If the local cutoff has passed, no bridge request is made and the command goes on to its cloud attempt if the deadline is still ahead, as when the cutoff had passed before the attempt; the attempt counter is not increased. If the deadline has passed before the cloud request, it is not made and the command fails `expired` with the existing message. Request contexts use `context.WithTimeout` with the time left, computed right after that check: local `min(RequestTimeout, cutoff − now)`, cloud `deadline − now`. (`WithDeadline` with an absolute time would mix the injected test clock with the real one; the remaining duration carries the same bound.) "No attempt starts after its deadline" (gateway 5.8) then holds regardless of how long anything before the call took; a request that started in time may still finish after the deadline, as today.
 
 ### 4.4 Monotonic time for every in-process duration
 
 Go's `time.Now()` carries a monotonic clock reading, and `Sub`, `Before`, `After`, `Until` and `context.WithDeadline` use it when both operands have one. A value loses it when it passes through `UTC()`, `Local()`, `In()`, `Round()`, `Truncate()`, `time.Unix()`, parsing or persistence. The rules:
 
 1. **Source.** The injected clocks (`Deps.Now`, `mqtt.ClientConfig.Now`, `Budget`'s and `CloudHub`'s `now`) are `time.Now` in production, passed unmodified. The command arrival time (`mqtt.Command.At`) is taken from that clock, so `receivedAt`, `deadline` and `cutoff` carry the monotonic reading.
-2. **Derivation.** Every deadline, cutoff, timeout, backoff, retry time, confirmation window and freshness comparison is derived from such a value with `Add` only, and compared with values from the same clock. Request contexts use `context.WithDeadline` with those absolute times (4.3), never `WithTimeout` from a recomputed duration.
+2. **Derivation.** Every deadline, cutoff, timeout, backoff, retry time, confirmation window and freshness comparison is derived from such a value with `Add` only, and compared with values from the same clock. Request contexts use `context.WithTimeout` with the time left, computed from those values immediately before the call (4.3).
 3. **Display only.** `UTC()`/`Truncate()` stay where a time is serialized: the state document (`last_event_at`), `command_status` times, the webhook list's `fetched_at`, the cache's `fetched_at`. Such values are never fed back into timing.
 4. **Persisted values.** Budget calls, `blocked_until`, the last mint time and the cache's `fetched_at` are wall-clock by necessity and keep today's restore rules (non-goals).
-5. **Tests.** Fake clocks return times without a monotonic reading; Go then falls back to wall-clock arithmetic, which is the time the test controls, so existing tests keep working. A test checks that the production wiring's clocks return values with a monotonic reading (`String()` contains `m=`), and that `Command.At` from the MQTT client carries one.
+5. **Tests.** Fake clocks return times without a monotonic reading; Go then falls back to wall-clock arithmetic, which is the time the test controls, so existing tests keep working. Code with goroutines and timers (the read goroutine, the 30 s publish-outcome timeout) is tested with `testing/synctest`. A test checks that the production wiring's clocks return values with a monotonic reading (`String()` contains `m=`) and that `Command.At` from the MQTT client carries one; a `go/ast` test fails when a call that drops the monotonic reading (`UTC`, `Local`, `In`, `Round`, `Truncate`, `time.Unix`) appears outside the allow-listed serialization sites.
 
 Today's code already follows rules 1–3 everywhere except the M1 contexts (4.3). This section makes them explicit so the async read path and future code keep them.
 
@@ -119,7 +119,7 @@ gateway.Supervisor
             - applies the bolt state and clears state_stale (today's rules)
         On a list fetched before the last /status read started
             - applies battery and online only; the bolt state and state_stale stay
-            - a confirmation read counts as not yet showing the target
+            - a confirmation read is ignored like one older than the last event
     readStatus / tryEnterLocal
         On success
             - records lastStatusAt as the time the read started
@@ -129,20 +129,23 @@ gateway.Supervisor
             - returns; the read's goroutine finishes without blocking
     two locks sharing a CloudHub
         On lock A's read blocked in the cloud API
-            - lock B's commands, events and its own reads proceed
+            - lock B's commands and events proceed; B's own read waits for the hub off B's loop
             - lock A's commands and events proceed
+    tickCloud
+        While a read is in flight
+            - does not mark the state stale for missing data; the check runs when the read is applied
     result after a mode change
         - is applied with today's rules behind the freshness guard
 
 commandPipeline
     attemptLocal
         On the local cutoff passing during the sending publish
-            - makes no bridge call; the command fails expired
+            - makes no bridge call; tries the cloud if the deadline is still ahead, else the command fails expired
     attemptCloud
         On the deadline passing during the sending publish
             - makes no cloud call; the command fails expired
     request contexts
-        - are created with context.WithDeadline at min(now+RequestTimeout, cutoff) (local) and at the deadline (cloud)
+        - end after min(RequestTimeout, cutoff − now) (local) and deadline − now (cloud), measured right before the call
 
 app wiring
     - passes time.Now unmodified as every injected clock

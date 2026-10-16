@@ -86,6 +86,8 @@ Below, `internal/...` gateway paths are relative to `loqed-mqtt/`.
 - LOQED blocks an account after >12 cloud calls in 12 h. The gateway's `cloud_budget` (default 10, max 12) is persisted across restarts; crash loops must not exceed it.
 - Bridge wire details: headers exactly `TIMESTAMP` / `HASH` (upper case on the wire), webhook timestamp tolerance ±20 s by default (`webhook.bridge_timestamp_tolerance`, 0 = off; the bridge delivers late when it has many webhooks), command query escaping replaces only `+` and `=`. State-reached events derive bolt state from `event_type`, never `requested_state`.
 - HA must not show a definite state older than reality without `state_stale`.
+- The per-lock loop never waits for MQTT acknowledgements or for cloud reads (spec 5.5 "Concurrency"); a cloud read's result never overwrites bolt data newer than it.
+- Deadlines, cutoffs, timeouts and windows are measured on the monotonic clock: derive them from the injected clock with `Add`, never from `UTC()`, `Truncate()`, parsed or persisted times (`internal/gateway/monotonic_test.go` enforces the allowed sites).
 
 ## Secrets and real hardware
 
