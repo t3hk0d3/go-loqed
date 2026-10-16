@@ -151,6 +151,7 @@ type fakePub struct {
 	statuses []model.CommandStatus
 	lists    []model.WebhookList
 	results  []model.WebhooksResult
+	onStatus func(model.CommandStatus) // runs inside PublishCommandStatus (a slow broker)
 }
 
 func (f *fakePub) PublishWebhooks(_ string, l model.WebhookList) error {
@@ -165,6 +166,9 @@ func (f *fakePub) PublishWebhooksResult(_ string, r model.WebhooksResult) error 
 
 func (f *fakePub) PublishCommandStatus(_ string, s model.CommandStatus) error {
 	f.statuses = append(f.statuses, s)
+	if f.onStatus != nil {
+		f.onStatus(s)
+	}
 	return nil
 }
 
