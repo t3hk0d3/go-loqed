@@ -22,7 +22,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: master
           persist-credentials: false
@@ -55,7 +55,7 @@ jobs:
             exit 1
           fi
           if [[ "$VERSION" == *-* ]]; then echo prerelease=true; else echo prerelease=false; fi >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0 # tags, to refuse an existing version
@@ -103,7 +103,7 @@ jobs:
             image: ghcr.io/t3hk0d3/loqed-mqtt-addon
             platforms: linux/amd64,linux/arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
@@ -141,7 +141,7 @@ jobs:
       PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0
